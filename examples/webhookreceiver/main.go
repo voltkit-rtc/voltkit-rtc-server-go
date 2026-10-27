@@ -40,11 +40,29 @@ func main() {
 	seen := newDedupe(24 * time.Hour)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /hooks/voltkit", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /hooks/voltkit", receive(secrets, seen, work))
+
+	addr := os.Getenv("ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:8098"
+	}
+	log.Printf("webhook receiver on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, mux))
+}
+
+// receive verifies one delivery, answers it, and hands it to the worker
+// unless it was delivered before.
+func receive(secrets []string, seen *dedupe, work chan<- *voltkit.StreamEvent) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		// The signature covers the exact bytes sent: read them raw, never
 		// through a JSON decoder and back.
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				w.WriteHeader(http.StatusRequestEntityTooLarge) // a delivery is a few KB: never more than 1 MB is read
+				return
+			}
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -73,14 +91,7 @@ func main() {
 		default:
 			log.Printf("webhook: queue full, dropping %s %s", event.Type, event.ID)
 		}
-	})
-
-	addr := os.Getenv("ADDR")
-	if addr == "" {
-		addr = "127.0.0.1:8098"
 	}
-	log.Printf("webhook receiver on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
 // worker does the work after the reply has gone out. Events are not ordered:

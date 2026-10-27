@@ -422,10 +422,11 @@ func TestAdversarial_RepliesOfEveryWrongShape(t *testing.T) {
 		_, err := newClient(t, scripted(rawStep(200, raw))).GetRoom(ctxBG, "r")
 		expectError(t, err, "http-200", 200, false, "")
 	}
-	// A 10 MB reply is read whole.
-	big := `{"rooms":[{"roomId":"r","metadata":"` + strings.Repeat("x", 10<<20) + `"}]}`
+	// A 7 MiB reply, under the 8 MiB cap, is read whole (0.1.0 read a 10 MB
+	// one here; the cap itself is pinned in replysize_test.go).
+	big := `{"rooms":[{"roomId":"r","metadata":"` + strings.Repeat("x", 7<<20) + `"}]}`
 	list, err := newClient(t, scripted(rawStep(200, big))).ListRooms(ctxBG)
-	if err != nil || len(list.Rooms) != 1 || len(list.Rooms[0].Metadata) != 10<<20+2 {
+	if err != nil || len(list.Rooms) != 1 || len(list.Rooms[0].Metadata) != 7<<20+2 {
 		t.Errorf("%v", err)
 	}
 	// Nested error shapes.

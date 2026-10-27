@@ -1,6 +1,33 @@
 # Changelog
 
-## 0.1.0 (prepared 2026-10-23, not yet published)
+## 0.1.1 (prepared 2026-10-27, not yet published)
+
+- Reply size cap. A reply body is read up to 8 MiB and no further, on a 2xx
+  and on an error status alike: a server that declares more (`Content-Length`)
+  is refused before a byte of the body is read, and one that streams more is
+  cut off one byte past the cap. The call fails with `http-<status>`, that
+  status and the message `<METHOD> <path>: the reply is too large: over 8
+  MiB, the most this SDK reads`; nothing of the reply is quoted, so nothing
+  of it can leak. `Retryable` follows the status rule of a reply that named
+  no code: a 5xx or 429 past the cap may pass, a 2xx or any other 4xx is not
+  retried. A reply at or under the cap, error bodies included (the
+  300-character cut and the redaction), is handled exactly as before. Until
+  now a 2xx was read whole with `io.ReadAll`, so a misbehaving API or a proxy
+  in front of it could force an allocation of any size. From the testers'
+  hardening note of 2026-10-27; this SDK's own guard, the shared
+  specification and the Node SDK read the whole reply. Tests in
+  `replysize_test.go`.
+- The CHANGELOG shipped in `v0.1.0` read "prepared 2026-10-23, not yet
+  published": 0.1.0 was published on 2026-10-23 as tag `v0.1.0` (proxy.golang.org
+  and pkg.go.dev indexed it the same day).
+- Examples: a token endpoint answers 502 on an incomplete token reply; request bodies are capped at 1 MB.
+  `examples/tokenserver` answers 502 with a JSON error when `CreateToken` returns no token or `wsUrl` (it
+  handed on empty strings with a 200), logging the room and never the reply; it reads no body.
+  `examples/webhookreceiver`, already capped at 1 MB, answers 413 instead of 400 to a larger body; its
+  handler is now `receive(...)` so a test can call it. Both have tests (`go test ./examples/...`). No
+  library change. From the testers' report of 2026-10-24 (EX-04 and EX-01, found in their own servers).
+
+## 0.1.0 (2026-10-23, published the same day as tag `v0.1.0`)
 
 The first release of the Go server SDK, at parity with `@voltkit-rtc/server`
 0.4.8 (the shared specification `docs/SERVER-SDK-SPEC.md` and vectors

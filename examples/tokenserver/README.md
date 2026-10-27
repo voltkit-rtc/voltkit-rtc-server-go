@@ -33,6 +33,9 @@ your own authentication and rules.
   and everything else (a wrong key, a suspended account, a bad call) to a 500
   that leaks nothing. The error is logged whole: the secret is never in it.
 - `Cache-Control: no-store` on the token, which is a credential for one room.
+- A reply without a token or `wsUrl` is answered 502, never handed on as a
+  200 the client cannot connect with. The log names the room, never the
+  reply, which may hold a token. `main_test.go` checks both answers.
 
 Nothing here is specific to `net/http`: with chi or Gin, read the path
 parameter their way and keep the same error mapping.

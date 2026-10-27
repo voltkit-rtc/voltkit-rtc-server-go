@@ -76,6 +76,12 @@ func join(client *voltkit.StreamClient) http.HandlerFunc {
 			writeError(w, err)
 			return
 		}
+		if tok.Token == "" || tok.WSURL == "" {
+			// A 200 without a usable token is no success. Logged by room, never the reply: it may hold a token.
+			log.Printf("join: CreateToken returned no token or wsUrl for room %q", roomID)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the RTC service returned an incomplete token; try again"})
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store") // a token is a credential for one room
 		writeJSON(w, http.StatusOK, map[string]any{
 			"token":     tok.Token,

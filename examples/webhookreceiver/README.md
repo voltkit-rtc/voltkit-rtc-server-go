@@ -28,6 +28,9 @@ minutes is refused with 401.
 - **The raw body.** The signature is HMAC-SHA256 over `<timestamp>.<raw
   body>`, so the bytes must reach `ParseWebhook` exactly as received, never
   through a JSON decoder and back.
+- **At most 1 MB.** A delivery is a few KB: `http.MaxBytesReader` stops
+  reading at 1 MB and the receiver answers 413 (`main_test.go` checks it,
+  with a signed delivery of exactly 1 MB still taken).
 - **Several secrets.** When you rotate the signing secret with an overlap,
   VoltKit signs every delivery with both the new and the old secret; a
   receiver holding either verifies, so you deploy the new secret while the

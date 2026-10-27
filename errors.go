@@ -14,10 +14,11 @@ package voltkit
 // the API key and any URL credentials are redacted before they can reach it.
 type Error struct {
 	// Code is the server's code (no-room, quota-exhausted, ...), network when
-	// no reply arrived, http-<status> when a reply named no code, redirected,
-	// rates-unconfigured, or bad-request for an id refused before sending. A
-	// newer controller may send a code this release does not know; it is
-	// passed through unchanged.
+	// no reply arrived, http-<status> when a reply named no code or could not
+	// be used (not JSON, another shape, or over the 8 MiB reply cap),
+	// redirected, rates-unconfigured, or bad-request for an id refused before
+	// sending. A newer controller may send a code this release does not know;
+	// it is passed through unchanged.
 	Code string
 	// Status is the HTTP status: 0 when nothing reached the server or the SDK
 	// refused the call itself, the 3xx for redirected.

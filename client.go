@@ -31,6 +31,15 @@ const (
 	backoffJitter = 100 * time.Millisecond
 	// ratesPath is where the website API serves the public rates.
 	ratesPath = "/api/v1/billing/rtc/rates/current"
+	// maxReplyBytes is the most of a reply body the SDK reads, 8 MiB, on a
+	// 2xx and on an error status alike. The largest honest reply (a list of
+	// thousands of rooms) is well under it; past it the reply is not the
+	// API's, or not one worth decoding, and reading on would let a
+	// misbehaving server or proxy make this process allocate without bound.
+	// A reply past the cap fails with http-<status> (replyTooLarge); nothing
+	// of it is used. This SDK's own hardening: the specification and the Node
+	// SDK read the whole reply (0.1.1, the testers' note of 2026-10-27).
+	maxReplyBytes = 8 << 20
 )
 
 // Config is what NewStreamClient needs. The zero value of an optional field
@@ -527,15 +536,41 @@ func (c *StreamClient) once(ctx context.Context, cl call, body []byte) (int, []b
 		}
 	}
 
+	// A server that declares more than the cap is refused before a byte of
+	// the body is read; one that does not declare its length (chunked, or
+	// HTTP/1.0 to the close) is read up to the cap and one byte more, which
+	// tells the two apart. Closing the body with the rest unread closes the
+	// connection instead of draining it.
+	if resp.ContentLength > maxReplyBytes {
+		return c.replyTooLarge(cl, resp.StatusCode)
+	}
 	// Reading the body is network I/O too: a connection that drops after the
 	// headers is the same transient failure as one that drops before them,
 	// and the deadline covers it. Only the read is in here: a reply read in
 	// full that then fails to parse is not a network error.
-	text, err := io.ReadAll(resp.Body)
+	text, err := io.ReadAll(io.LimitReader(resp.Body, maxReplyBytes+1))
 	if err != nil {
 		return 0, nil, c.transportError(ctx, attemptCtx, cl, err)
 	}
+	if len(text) > maxReplyBytes {
+		return c.replyTooLarge(cl, resp.StatusCode)
+	}
 	return c.parseReply(cl, resp.StatusCode, text)
+}
+
+// replyTooLarge is the answer to a reply past maxReplyBytes, whatever its
+// status: http-<status>, since the server's code, if it sent one, is in a
+// body that is not used, and a message that names the cap and quotes nothing
+// of the reply, so there is nothing in it to redact. Retryable follows the
+// status rule of section 3.6, as for any reply that named no code: a 5xx or
+// 429 may pass, and a 2xx or any other 4xx would come back the same.
+func (c *StreamClient) replyTooLarge(cl call, status int) (int, []byte, error) {
+	return 0, nil, &Error{
+		Code:      fmt.Sprintf("http-%d", status),
+		Status:    status,
+		Message:   fmt.Sprintf("%s %s: the reply is too large: over %d MiB, the most this SDK reads", cl.method, cl.path, maxReplyBytes>>20),
+		Retryable: status >= 500 || status == 429,
+	}
 }
 
 // transportError classifies a failure in transit: the caller's own context

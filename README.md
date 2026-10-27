@@ -342,7 +342,7 @@ Every code a call can fail with, from the shared registry (`RESTErrorCodes`).
 | `network` | 0 | yes | No reply: DNS, a refused or dropped connection, the timeout. Try again later; if it persists, check your server's outbound network. |
 | `redirected` | 3xx | no | The server answered a request carrying the key with a redirect. Fix `BaseURL`: see [Redirects are never followed](#redirects-are-never-followed). |
 | `rates-unconfigured` | 0 | no | `GetRates` without `RatesBaseURL`. Set it to the website API's origin. |
-| `http-<status>` | that status | only a 429 or 5xx | A reply that named no code: a proxy's error page, or a success that is not JSON. Check `BaseURL`, and anything between your server and VoltKit. |
+| `http-<status>` | that status | only a 429 or 5xx | A reply that named no code: a proxy's error page, a success that is not JSON, or a reply over 8 MiB, the most the SDK reads of any reply ("the reply is too large"). Check `BaseURL`, and anything between your server and VoltKit. |
 | `RATE_LIMITED`, `NOT_FOUND`, ... | as sent | by status | The website API's own codes, from `GetRates`, passed through unchanged. |
 
 `ErrorCodes` is the whole shared registry in its order, `RESTErrorCodes` the
@@ -381,7 +381,8 @@ safe to repeat: token minting, reads (`GetBalance` and `GetRates` included),
 error (no reply, a dropped connection, the timeout), a `429`, or a `5xx` other
 than `billing-unavailable`, the one 503 that lasts until an operator acts.
 Any other `4xx` is a decision the server made and will make again;
-`redirected` and a `2xx` that is not JSON are not transient either.
+`redirected`, a `2xx` that is not JSON and a reply over 8 MiB (the most the
+SDK reads of any reply) are not transient either.
 
 The waits are 200 ms, 400 ms, 800 ms, ... plus up to 100 ms at random, so a
 fleet of servers does not retry in step (the doubling is held at 2^31−1 ms,
@@ -630,7 +631,7 @@ body yourself: `hex(HMAC-SHA256(secret, "<t>." + body))` in the header
 ## Versions
 
 `voltkit.Version` is the module's version, and `User-Agent:
-voltkit-rtc-go/<Version>` goes on every request. This is 0.1.0, at parity
+voltkit-rtc-go/<Version>` goes on every request. This is 0.1.1, at parity
 with `@voltkit-rtc/server` 0.4.8; [CHANGELOG.md](CHANGELOG.md) lists what each
 release changes. Until 1.0, a breaking change is a minor bump and everything
 else a patch.
