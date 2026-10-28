@@ -436,6 +436,41 @@ type RtcSurcharge struct {
 	Credits string `json:"credits"`
 }
 
+// RtcAddonRate is what an add-on costs: billed on top of a participant's
+// tier while the add-on is in use (0.1.2). The Music add-on (Addons.Music):
+// in-app music is billed on standard and HD voice while music plays, and
+// included with video. "music" is an add-on id, not a tier: a usage line with
+// tier "music" is the add-on's participant-minutes next to the participant's
+// own tier line.
+type RtcAddonRate struct {
+	// ID is the add-on id ("music") and Label its name ("Music add-on"), when
+	// the API sends them.
+	ID    string `json:"id,omitempty"`
+	Label string `json:"label,omitempty"`
+	// Price is credits per 1,000 participant-minutes while the add-on is in
+	// use, e.g. "10.00" ("0.00" when this price list does not charge for it);
+	// CuPerParticipantSecond the same price as an exact integer, e.g. "1000",
+	// when sent.
+	Price                  string `json:"price"`
+	CuPerParticipantSecond string `json:"cuPerParticipantSecond,omitempty"`
+	// Unit is the unit in words, e.g. "credits per 1,000 participant-minutes
+	// while music plays".
+	Unit string `json:"unit"`
+	// AppliesTo names the tiers it is billed on top of (music: audio_std,
+	// audio_hd); IncludedIn the tiers that include it at no extra charge
+	// (music: every video tier).
+	AppliesTo  []string `json:"appliesTo"`
+	IncludedIn []string `json:"includedIn"`
+}
+
+// RtcAddons is the add-ons of a price list, by id.
+type RtcAddons struct {
+	// Music is the Music add-on: ₹10 per 1,000 participant-minutes while
+	// music plays, on standard and HD voice; included with video. Enabled per
+	// project under Settings → Media and quality. Nil when the list has none.
+	Music *RtcAddonRate `json:"music,omitempty"`
+}
+
 // ReceiveKbps is what one viewer receives at the top layer.
 type ReceiveKbps struct {
 	Video int `json:"video"`
@@ -491,6 +526,9 @@ type RtcRates struct {
 	Unit        RtcUnit        `json:"unit"`
 	Tiers       []RtcTierRate  `json:"tiers"`
 	Surcharges  []RtcSurcharge `json:"surcharges"`
+	// Addons are billed on top of a tier while in use (0.1.2): Music, the
+	// Music add-on. Nil for a price list older than the add-on.
+	Addons *RtcAddons `json:"addons,omitempty"`
 	// IdleTier is what a participant who is only connected is billed as:
 	// audio_std or none.
 	IdleTier   string        `json:"idleTier"`

@@ -206,6 +206,20 @@ if b.Wallet != nil {
 }
 ```
 
+**How a reply is decoded.** Into the typed structs, by the standard
+library's `encoding/json`, whose rules differ from the other VoltKit SDKs' in
+ways only a reply that is not the API's can show. A JSON key matches a field
+**case-insensitively**, Unicode case folding included: `"Price"` and `"PRICE"`
+fill `Price`, and `"muſic"` (with a long s) fills `Music`; when a reply holds
+two spellings of one field, the last one wins. A key that appears twice keeps
+its last value, and a duplicated object is merged field by field rather than
+replaced. A field the struct does not have is dropped: an add-on id newer than
+this release is not in `Addons` (upgrade to read it). A number where the
+struct has a string (a price, a cu amount) is refused with `http-<status>`
+rather than converted, so a string field is always the server's own text. The
+API sends exact lower-camel-case keys once each, so none of this changes what
+a real reply decodes to.
+
 ### Rates
 
 ```go
@@ -216,8 +230,21 @@ client, err := voltkit.NewStreamClient(voltkit.Config{
 })
 rates, err := client.GetRates(ctx)
 // rates.Version, rates.Tiers ([{ID: "video_30", Credits: "99.00", CuPerParticipantSecond: "9900", ...}]),
-// rates.Surcharges, rates.IdleTier, rates.Modes, rates.Conversion, rates.Notes
+// rates.Surcharges, rates.Addons (nil before the Music add-on; .Music: Price "10.00", CuPerParticipantSecond "1000",
+// Unit, AppliesTo, IncludedIn), rates.IdleTier, rates.Modes, rates.Conversion, rates.Notes
 ```
+
+**The Music add-on (0.1.2).** `rates.Addons.Music` prices in-app music
+(`publishMusic` in the client SDKs): Music is an add-on on standard and HD voice
+(₹10 per 1,000 participant-minutes while music plays, enabled in the project's
+Settings → Media and quality); included with video. `Price` is in credits per
+1,000 participant-minutes and `CuPerParticipantSecond` the same as an exact
+integer; `AppliesTo` names the voice tiers it is billed on top of and
+`IncludedIn` the video tiers that include it. `Addons` is nil for a price list
+from before the add-on, so check it before reading `Music`. `music` is an
+add-on id, not a tier: a usage line with `tier: "music"` (the settlement feed,
+the console's usage, the invoice) is the add-on's participant-minutes next to
+the participant's own tier line.
 
 The public price list: each tier in credits per 1,000 participant-minutes,
 the media modes that are switched on, and the conversion for new recharges.
@@ -631,8 +658,8 @@ body yourself: `hex(HMAC-SHA256(secret, "<t>." + body))` in the header
 ## Versions
 
 `voltkit.Version` is the module's version, and `User-Agent:
-voltkit-rtc-go/<Version>` goes on every request. This is 0.1.1, at parity
-with `@voltkit-rtc/server` 0.4.8; [CHANGELOG.md](CHANGELOG.md) lists what each
+voltkit-rtc-go/<Version>` goes on every request. This is 0.1.2, at parity
+with `@voltkit-rtc/server` 0.4.9; [CHANGELOG.md](CHANGELOG.md) lists what each
 release changes. Until 1.0, a breaking change is a minor bump and everything
 else a patch.
 

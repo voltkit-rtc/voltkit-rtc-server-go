@@ -4,7 +4,7 @@ package voltkit
 // the number lives: the User-Agent header of every request carries it
 // (voltkit-rtc-go/<Version>, spec section 8), and the repository's contract
 // check compares it with docs/sdk-contract.json.
-const Version = "0.1.1"
+const Version = "0.1.2"
 
 // userAgent is sent on every request, to the controller and to the rates host
 // alike: the SDK's name and version, nothing more. No OS, runtime version or

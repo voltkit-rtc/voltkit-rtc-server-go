@@ -1,6 +1,25 @@
 # Changelog
 
-## 0.1.1 (prepared 2026-10-27, not yet published)
+## 0.1.2 (prepared 2026-10-28, not published)
+
+- The Music add-on in `GetRates`. `RtcRates.Addons` (nil for a price list from before the add-on) carries
+  `Music`, an `RtcAddonRate`: `Price` in credits per 1,000 participant-minutes while music plays (`"10.00"`),
+  `CuPerParticipantSecond` as the exact integer (`"1000"`), `Unit`, `AppliesTo` (`audio_std`, `audio_hd`: the
+  voice tiers it is billed on top of), `IncludedIn` (the video tiers, which include it), `ID` and `Label`.
+  Music is an add-on on standard and HD voice (₹10 per 1,000 participant-minutes while music plays, enabled in
+  the project's Settings → Media and quality); included with video. `music` is an add-on id, not a tier: a
+  usage line with `tier: "music"` is the add-on's participant-minutes next to the participant's own tier line.
+  Pinned by the shared vectors (the `getRates` reply carries `addons.music`); `addons_test.go`. Nothing else
+  changed.
+- Docs only, no code change (the SDK red team of 2026-10-28): the README says how a reply is decoded.
+  `encoding/json` matches a JSON key to a field case-insensitively, Unicode case folding included (`"PRICE"`
+  fills `Price`, `"muſic"` fills `Music`; of two spellings the last wins), keeps the last value of a
+  duplicated key and merges a duplicated object, drops a field the struct does not have (an add-on id newer
+  than the release), and refuses a number in a string field. The other SDKs match keys exactly; a reply of
+  the API holds each key once, in its exact case, so no real reply decodes differently. Pinned by the red
+  team's `redteam_test.go`.
+
+## 0.1.1 (2026-10-27)
 
 - Reply size cap. A reply body is read up to 8 MiB and no further, on a 2xx
   and on an error status alike: a server that declares more (`Content-Length`)
