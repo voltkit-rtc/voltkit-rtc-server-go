@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -65,7 +66,11 @@ type vectorFile struct {
 			SignaturePattern string `json:"signaturePattern"`
 			MaxHeaderLength  int    `json:"maxHeaderLength"`
 		} `json:"webhookHeader"`
-		RatesPath string `json:"ratesPath"`
+		RatesPath  string `json:"ratesPath"`
+		ReplyShape struct {
+			MessagePrefix string `json:"messagePrefix"`
+			NotAnObject   string `json:"notAnObject"`
+		} `json:"replyShape"`
 	} `json:"constants"`
 	Registry struct {
 		ErrorCodes     []string `json:"errorCodes"`
@@ -95,6 +100,15 @@ type vectorFile struct {
 			NowUnixSeconds   int64    `json:"nowUnixSeconds"`
 			Expected         bool     `json:"expected"`
 		} `json:"verify"`
+		WholeSeconds []struct {
+			Name             string   `json:"name"`
+			Body             string   `json:"body"`
+			Header           string   `json:"header"`
+			Secrets          []string `json:"secrets"`
+			ToleranceSeconds *float64 `json:"toleranceSeconds"`
+			NowUnixMillis    int64    `json:"nowUnixMillis"`
+			Expected         bool     `json:"expected"`
+		} `json:"wholeSeconds"`
 		Parse []struct {
 			Name     string   `json:"name"`
 			Body     string   `json:"body"`
@@ -151,6 +165,32 @@ type vectorFile struct {
 				RatesError *vError `json:"ratesError"`
 			} `json:"expected"`
 		} `json:"urls"`
+		BaseURLs struct {
+			Accepted []struct {
+				Name     string `json:"name"`
+				BaseURL  string `json:"baseUrl"`
+				RoomsURL string `json:"roomsUrl"`
+			} `json:"accepted"`
+			Refused []struct {
+				Name        string `json:"name"`
+				BaseURL     string `json:"baseUrl"`
+				MustNotShow string `json:"mustNotShow"`
+				Expected    struct {
+					ProgrammerError bool   `json:"programmerError"`
+					NodeMessage     string `json:"nodeMessage"`
+				} `json:"expected"`
+			} `json:"refused"`
+			Required []struct {
+				BaseURL  string `json:"baseUrl"`
+				Expected struct {
+					MessagePrefix string `json:"messagePrefix"`
+				} `json:"expected"`
+			} `json:"required"`
+			NotStrings  []json.RawMessage `json:"notStrings"`
+			Credentials struct {
+				URLs []string `json:"urls"`
+			} `json:"credentials"`
+		} `json:"baseUrls"`
 	} `json:"options"`
 	IDs struct {
 		Places []struct {
@@ -167,6 +207,15 @@ type vectorFile struct {
 			ID      string `json:"id"`
 			Segment string `json:"segment"`
 		} `json:"encoded"`
+		NotStrings struct {
+			Cases []struct {
+				Name string `json:"name"`
+			} `json:"cases"`
+		} `json:"notStrings"`
+		Numbers []struct {
+			ID      json.Number `json:"id"`
+			Segment string      `json:"segment"`
+		} `json:"numbers"`
 	} `json:"ids"`
 	Redaction struct {
 		Cases []struct {
@@ -248,6 +297,22 @@ type vectorFile struct {
 			Expected map[string]bool `json:"expected"`
 		} `json:"cases"`
 	} `json:"errorHelpers"`
+	Replies struct {
+		Cases []struct {
+			Name     string         `json:"name"`
+			Method   string         `json:"method"`
+			Args     map[string]any `json:"args"`
+			Reply    vReply         `json:"reply"`
+			Expected struct {
+				Attempts int             `json:"attempts"`
+				Error    *vError         `json:"error"`
+				Resolves bool            `json:"resolves"`
+				Holds    json.RawMessage `json:"holds"`
+				List     json.RawMessage `json:"list"`
+				Nothing  bool            `json:"nothing"`
+			} `json:"expected"`
+		} `json:"cases"`
+	} `json:"replies"`
 }
 
 type vError struct {
@@ -475,6 +540,8 @@ func TestVectors_Constants(t *testing.T) {
 	check("header", "X-API-Key", c.Headers.APIKey)
 	check("webhook header length", maxSignatureHeaderLength, c.WebhookHeader.MaxHeaderLength)
 	check("cuts", []int{300, 100, 200}, []int{c.MessageCuts.ErrorReplyWithoutMessage, c.MessageCuts.SuccessThatIsNotJSON, c.MessageCuts.RedirectTarget})
+	check("reply shape prefix", replyShapePrefix, c.ReplyShape.MessagePrefix)
+	check("reply not an object", replyNotAnObject, c.ReplyShape.NotAnObject)
 	// The default waits: retries 4 shows all four.
 	ft := scripted(errorStep(503, "unavailable", "x"))
 	cl := newClient(t, ft, withRetries(4))
@@ -533,6 +600,20 @@ func TestVectors_Webhooks(t *testing.T) {
 			t.Errorf("verify %q: %v, want %v", tc.Name, got, tc.Expected)
 		}
 	}
+	if len(v.Webhooks.WholeSeconds) == 0 {
+		t.Errorf("no webhooks.wholeSeconds cases")
+	}
+	for _, tc := range v.Webhooks.WholeSeconds {
+		opts := &VerifyOptions{Now: func() time.Time { return time.UnixMilli(tc.NowUnixMillis) }}
+		if tc.ToleranceSeconds != nil {
+			opts.Tolerance = Ptr(time.Duration(*tc.ToleranceSeconds * float64(time.Second)))
+		}
+		if got := VerifyWebhook([]byte(tc.Body), tc.Header, tc.Secrets, opts); got != tc.Expected {
+			t.Errorf("whole seconds %q: %v, want %v", tc.Name, got, tc.Expected)
+		}
+	}
+	// webhooks.badNow is for a verifier that takes now as a number: Now here
+	// is a func() time.Time, which cannot be NaN, an infinity or a string.
 	for _, tc := range v.Webhooks.Parse {
 		ev, err := ParseWebhook([]byte(tc.Body), tc.Header, tc.Secrets, &VerifyOptions{Now: func() time.Time { return time.Unix(g.Timestamp, 0) }})
 		if tc.Expected.Error != nil {
@@ -696,6 +777,182 @@ func TestVectors_Options(t *testing.T) {
 	}
 }
 
+// sameURL compares two URLs as the transport reads them: net/url writes the
+// scheme in lower case and escapes an @ inside a password.
+func sameURL(got, want string) bool {
+	u, err := url.Parse(want)
+	return err == nil && got == u.String()
+}
+
+func TestVectors_BaseURLs(t *testing.T) {
+	v := vectors(t)
+	b := v.Options.BaseURLs
+	if len(b.Accepted) == 0 || len(b.Refused) == 0 || len(b.Required) == 0 || len(b.Credentials.URLs) == 0 {
+		t.Fatalf("options.baseUrls is incomplete")
+	}
+	rates := func(roomsURL string) string { return strings.TrimSuffix(roomsURL, "/v1/rooms") + ratesPath }
+	for _, tc := range b.Accepted {
+		ft := scripted(jsonStep(200, map[string]any{"rooms": []any{}, "success": true, "data": map[string]any{}}))
+		c, err := NewStreamClient(Config{BaseURL: tc.BaseURL, RatesBaseURL: tc.BaseURL, APIKey: testKey, HTTPClient: &http.Client{Transport: ft}})
+		if err != nil {
+			t.Errorf("accepted %q: %v", tc.Name, err)
+			continue
+		}
+		pinClock(c)
+		if _, err := c.ListRooms(ctxBG); err != nil || !sameURL(ft.call(0).URL, tc.RoomsURL) {
+			t.Errorf("accepted %q: ListRooms went to %q (%v), want %q", tc.Name, ft.call(0).URL, err, tc.RoomsURL)
+		}
+		if _, err := c.GetRates(ctxBG); err != nil || !sameURL(ft.call(1).URL, rates(tc.RoomsURL)) {
+			t.Errorf("accepted %q as RatesBaseURL: GetRates went to %q (%v)", tc.Name, ft.call(1).URL, err)
+		}
+	}
+	for _, tc := range b.Refused {
+		// The sense of Node's words: what follows "baseUrl " and precedes the
+		// note that the URL is not shown. This SDK uses the same words.
+		sense := strings.TrimPrefix(tc.Expected.NodeMessage, "baseUrl ")
+		sense = sense[:strings.Index(sense, " (it is not shown here")]
+		for _, field := range []string{"BaseURL", "RatesBaseURL"} {
+			cfg := Config{BaseURL: "https://x.test", APIKey: testKey}
+			if field == "BaseURL" {
+				cfg.BaseURL = tc.BaseURL
+			} else {
+				cfg.RatesBaseURL = tc.BaseURL
+			}
+			c, err := NewStreamClient(cfg)
+			var e *Error
+			if err == nil || errors.As(err, &e) {
+				t.Errorf("refused %q as %s: %v, %v; want a plain error", tc.Name, field, c, err)
+				continue
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "Config."+field+" "+sense) || !strings.Contains(msg, "it is not shown here") {
+				t.Errorf("refused %q as %s: %q, want Config.%s %s", tc.Name, field, msg, field, sense)
+			}
+			if (tc.MustNotShow != "" && strings.Contains(msg, tc.MustNotShow)) || (len(tc.BaseURL) > 8 && strings.Contains(msg, tc.BaseURL)) {
+				t.Errorf("refused %q as %s: the message quotes the URL: %q", tc.Name, field, msg)
+			}
+			if errors.Unwrap(err) != nil {
+				t.Errorf("refused %q as %s: the error wraps another, which may quote the URL", tc.Name, field)
+			}
+		}
+	}
+	for _, tc := range b.Required {
+		_, err := NewStreamClient(Config{BaseURL: tc.BaseURL, APIKey: testKey})
+		if err == nil || !strings.Contains(err.Error(), "Config.BaseURL is required") {
+			t.Errorf("required %q: %v", tc.BaseURL, err)
+		}
+		// As RatesBaseURL, nothing left means unset: GetRates fails at once.
+		ft := scripted(jsonStep(200, map[string]any{"success": true, "data": map[string]any{}}))
+		c := newClient(t, ft, withRates(tc.BaseURL))
+		_, err = c.GetRates(ctxBG)
+		if e := asError(t, err); e.Code != "rates-unconfigured" || ft.count() != 0 {
+			t.Errorf("RatesBaseURL %q: %v after %d requests, want rates-unconfigured and none", tc.BaseURL, err, ft.count())
+		}
+	}
+	// options.baseUrls.notStrings: Config.BaseURL is a string; nothing else
+	// compiles.
+	//
+	// options.baseUrls.credentials: net/http sends a URL's user info (as
+	// Authorization: Basic, TestD8_UserInfoInBaseURLGoesOutWithTheRealTransport),
+	// so this SDK accepts it as before: requests go to the URL as given, and
+	// the client never shows it.
+	for _, u := range b.Credentials.URLs {
+		ft := scripted(jsonStep(200, map[string]any{"rooms": []any{}}))
+		c := newClient(t, ft, func(cfg *Config) { cfg.BaseURL = u })
+		if _, err := c.ListRooms(ctxBG); err != nil || !sameURL(ft.call(0).URL, u+"/v1/rooms") {
+			t.Errorf("credentials %q: went to %q (%v)", u, ft.call(0).URL, err)
+		}
+		j, _ := json.Marshal(c)
+		for _, view := range []string{fmt.Sprintf("%v", c), fmt.Sprintf("%+v", *c), fmt.Sprintf("%#v", c), string(j)} {
+			if strings.Contains(view, "hunter2") || !strings.Contains(view, "https://[redacted]@x.test") {
+				t.Errorf("credentials %q: printed as %s", u, view)
+			}
+		}
+	}
+}
+
+func TestVectors_Replies(t *testing.T) {
+	v := vectors(t)
+	if len(v.Replies.Cases) < 300 {
+		t.Fatalf("%d replies cases", len(v.Replies.Cases))
+	}
+	for _, tc := range v.Replies.Cases {
+		ft := scripted(tc.Reply.step())
+		got, err := invoke(ctxBG, newClient(t, ft, withRetries(2)), tc.Method, tc.Args)
+		if ft.count() != tc.Expected.Attempts {
+			t.Errorf("%s: %d attempts, want %d", tc.Name, ft.count(), tc.Expected.Attempts)
+		}
+		if tc.Expected.Error != nil {
+			var e *Error
+			if !errors.As(err, &e) {
+				t.Errorf("%s: %v, %v; want %q", tc.Name, got, err, tc.Expected.Error.Message)
+				continue
+			}
+			expectVectorError(t, tc.Name, err, *tc.Expected.Error)
+			continue
+		}
+		if err != nil || !tc.Expected.Resolves {
+			t.Errorf("%s: %v", tc.Name, err)
+			continue
+		}
+		switch {
+		case tc.Expected.Nothing:
+			if got != nil {
+				t.Errorf("%s: resolved to %v, want nothing", tc.Name, got)
+			}
+		case len(tc.Expected.List) > 0:
+			assertHolds(t, tc.Name, got, tc.Expected.List)
+		default:
+			assertHolds(t, tc.Name, got, tc.Expected.Holds)
+		}
+	}
+}
+
+// assertHolds checks that the JSON form of got has every field of want with
+// want's value, recursively; other fields are not pinned. Lists must have
+// want's length.
+func assertHolds(t *testing.T, name string, got any, want json.RawMessage) {
+	t.Helper()
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w, g any
+	_ = json.Unmarshal(want, &w)
+	_ = json.Unmarshal(gotJSON, &g)
+	var holds func(w, g any) bool
+	holds = func(w, g any) bool {
+		switch wv := w.(type) {
+		case map[string]any:
+			gv, ok := g.(map[string]any)
+			if !ok {
+				return false
+			}
+			for k, child := range wv {
+				if gc, present := gv[k]; !present || !holds(child, gc) {
+					return false
+				}
+			}
+			return true
+		case []any:
+			gv, ok := g.([]any)
+			if !ok || len(gv) != len(wv) {
+				return false
+			}
+			for i := range wv {
+				if !holds(wv[i], gv[i]) {
+					return false
+				}
+			}
+			return true
+		}
+		return reflect.DeepEqual(w, g)
+	}
+	if !holds(w, g) {
+		t.Errorf("%s: %s does not hold %s", name, gotJSON, want)
+	}
+}
+
 func TestVectors_IDs(t *testing.T) {
 	v := vectors(t)
 	if len(v.IDs.Places) != 20 {
@@ -715,10 +972,26 @@ func TestVectors_IDs(t *testing.T) {
 		if got := encodeSegment(tc.ID); got != tc.Segment {
 			t.Errorf("encodeSegment(%q) = %q, want %q", tc.ID, got, tc.Segment)
 		}
-		ft := scripted(jsonStep(200, map[string]any{}))
+		ft := scripted(jsonStep(200, map[string]any{"room": map[string]any{}}))
 		_, _ = newClient(t, ft).GetRoom(ctxBG, tc.ID)
 		if got := ft.call(0).Path; got != "/v1/rooms/"+tc.Segment {
 			t.Errorf("GetRoom(%q) sent %q", tc.ID, got)
+		}
+	}
+	// ids.notStrings: an id here is a string, which has no nil; nothing else
+	// compiles. The zero value, "", is in ids.refused above.
+	if len(v.IDs.NotStrings.Cases) == 0 {
+		t.Errorf("no ids.notStrings cases")
+	}
+	// ids.numbers: Go lets no number through as an id; an app with numeric
+	// ids passes their digits (strconv), which are sent as they are.
+	if len(v.IDs.Numbers) == 0 {
+		t.Errorf("no ids.numbers cases")
+	}
+	for _, tc := range v.IDs.Numbers {
+		ft := scripted(jsonStep(200, map[string]any{"room": map[string]any{}}))
+		if _, err := newClient(t, ft).GetRoom(ctxBG, tc.ID.String()); err != nil || ft.call(0).Path != "/v1/rooms/"+tc.Segment {
+			t.Errorf("GetRoom(%q): %v, sent %q, want /v1/rooms/%s", tc.ID, err, ft.call(0).Path, tc.Segment)
 		}
 	}
 }

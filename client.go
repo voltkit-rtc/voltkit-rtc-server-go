@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -40,21 +41,37 @@ const (
 	// of it is used. This SDK's own hardening: the specification and the Node
 	// SDK read the whole reply (0.1.1, the testers' note of 2026-10-27).
 	maxReplyBytes = 8 << 20
+	// replyShapePrefix and replyNotAnObject are the words of a 2xx reply that
+	// is not what the call needs (spec section 3.6, vectors constants.replyShape).
+	replyShapePrefix = "the reply is not the expected shape: "
+	replyNotAnObject = "it is not an object"
 )
 
 // Config is what NewStreamClient needs. The zero value of an optional field
 // means its default.
+//
+// Keep the *StreamClient, not the Config. Config's String, Format, MarshalJSON
+// and LogValue hide the key, but fmt cannot call a method of a value it reaches
+// through an unexported struct field, so fmt.Sprintf("%+v", server{cfg}) with
+// cfg in an unexported field prints APIKey as it is. A StreamClient prints no
+// secret wherever it sits: it keeps them in closures.
 type Config struct {
 	// BaseURL is the controller's origin, with its exact scheme and host:
 	// https://api.voltkit.in for VoltKit cloud. The API key is sent here and
-	// nowhere else. A trailing slash is dropped.
+	// nowhere else. Whitespace at both ends (a line read from a file) and then
+	// one trailing slash are dropped. It must be http:// or https://, a host,
+	// a port of 1 to 65535 if any, and a path prefix if any, in ASCII, with no
+	// query or fragment; anything else fails in NewStreamClient. User info
+	// (https://user:password@host) is sent as net/http sends it, as
+	// Authorization: Basic, and never shown.
 	BaseURL string
 	// APIKey is the project API secret (sk_ and 64 hex digits). Server-side
 	// only; whitespace around it is ignored. It is never quoted in an error.
 	APIKey string
 	// RatesBaseURL is the website API's origin (https://api.voltkit.in),
 	// where GetRates reads the public price list with no credential. Only
-	// GetRates needs it; "" and "/" mean unset.
+	// GetRates needs it. Checked like BaseURL, except that nothing left ("",
+	// "/", only whitespace) means unset.
 	RatesBaseURL string
 	// Timeout is the deadline for each attempt, from sending the request to
 	// reading the last byte of the reply. Zero means 10 seconds; it must not
@@ -93,8 +110,10 @@ func (c Config) GoString() string { return c.String() }
 // Format prints the same redacted view under every fmt verb. Without it, a
 // verb that has no meaning for a struct (%d, %t, %c, %U) makes fmt print each
 // field as it is, key included. Config is still a plain struct: a
-// reflection-based dumper, or %p on a value rather than a pointer (which go
-// vet flags), reads its fields. Keep a Config out of dumps.
+// reflection-based dumper, %p on a value rather than a pointer (which go vet
+// flags), or fmt printing a struct that holds a Config in an unexported field
+// (fmt calls no method there) reads its fields. Keep a Config out of dumps and
+// out of long-lived structs: keep the *StreamClient.
 func (c Config) Format(f fmt.State, verb rune) { _, _ = io.WriteString(f, c.String()) }
 
 // MarshalJSON serializes the redacted view, so a Config in a structured log
@@ -195,17 +214,18 @@ func NewStreamClient(cfg Config) (*StreamClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	baseURL := strings.TrimSuffix(cfg.BaseURL, "/")
-	if err := checkOrigin("BaseURL", baseURL); err != nil {
+	baseURL, err := originOf("BaseURL", cfg.BaseURL)
+	if err != nil {
 		return nil, err
 	}
-	// Empty counts as unset, so GetRates says what is missing rather than
-	// requesting a relative URL.
-	ratesBaseURL := strings.TrimSuffix(cfg.RatesBaseURL, "/")
-	if ratesBaseURL != "" {
-		if err := checkOrigin("RatesBaseURL", ratesBaseURL); err != nil {
-			return nil, err
-		}
+	if baseURL == "" {
+		return nil, errors.New("voltkit: Config.BaseURL is required: the one given is only whitespace or a slash")
+	}
+	// Nothing left counts as unset, so GetRates says what is missing rather
+	// than requesting a relative URL.
+	ratesBaseURL, err := originOf("RatesBaseURL", cfg.RatesBaseURL)
+	if err != nil {
+		return nil, err
 	}
 	timeout := cfg.Timeout
 	switch {
@@ -300,20 +320,103 @@ func checkAPIKey(key string) (string, error) {
 	return net, nil
 }
 
-// checkOrigin requires an absolute http or https URL with a host and no query
-// or fragment: anything else would fail every call, far from the mistake (a
-// path after "?" lands in the query, one after "#" is dropped). A path prefix
-// is fine: a reverse proxy may well serve the API under one. The message never
-// repeats the value, which may carry credentials.
-func checkOrigin(field, origin string) error {
-	u, err := url.Parse(origin)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("voltkit: Config.%s must be an absolute http or https URL with a host, such as https://api.voltkit.in", field)
+// originOf returns a URL option as requests use it: whitespace at both ends
+// (space, tab, CR, LF; a line read from a file) and then one trailing slash
+// dropped, "" when nothing is left (the caller knows whether that may be), or
+// an error now (spec section 2.2, N049-8). A URL no request can use passed
+// here before and then failed every call as a retried network error, far from
+// the mistake. No message quotes the URL and no error wraps another: it may
+// hold credentials, and url.Parse's own error quotes its input.
+func originOf(field, raw string) (string, error) {
+	origin := strings.TrimSuffix(strings.Trim(raw, " \t\r\n"), "/")
+	if origin == "" {
+		return "", nil
 	}
+	if problem := originProblem(origin); problem != "" {
+		return "", fmt.Errorf("voltkit: Config.%s %s (it is not shown here: it may hold credentials)", field, problem)
+	}
+	return origin, nil
+}
+
+// originProblem says what is wrong with origin, in words that do not quote
+// it, or "" when nothing is.
+func originProblem(origin string) string {
+	// Only "!" to "~", no backslash: a space, a control character or a
+	// character outside ASCII means something different to every parser.
+	for i := 0; i < len(origin); i++ {
+		if c := origin[i]; c < 0x21 || c > 0x7e || c == '\\' {
+			return "holds a space, a control character, a backslash or a character outside ASCII: percent-encode it or take it out"
+		}
+	}
+	// The scheme, in either case. Without one a transport might guess, and
+	// send the key in clear text.
+	var rest string
+	switch lower := strings.ToLower(origin); {
+	case strings.HasPrefix(lower, "http://"):
+		rest = origin[len("http://"):]
+	case strings.HasPrefix(lower, "https://"):
+		rest = origin[len("https://"):]
+	default:
+		return "must be an absolute http or https URL such as https://api.voltkit.in"
+	}
+	// A path after "?" would land in the query, one after "#" be dropped.
 	if strings.ContainsAny(origin, "?#") {
-		return fmt.Errorf("voltkit: Config.%s must be an origin, with nothing after a \"?\" or \"#\": the request paths are appended to it", field)
+		return "must not hold a query or a fragment: the API paths are appended to it"
 	}
-	return nil
+	authority := rest
+	if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+		authority = rest[:slash]
+	}
+	if !validHostPort(authority[strings.LastIndexByte(authority, '@')+1:]) {
+		return "must name a host, and a port only as a number from 1 to 65535"
+	}
+	// Anything else Go's own parser refuses (an escape such as %zz, user info
+	// net/url does not take): net/http would refuse it on every call.
+	if u, err := url.Parse(origin); err != nil || u.Host == "" {
+		return "is not a URL this SDK's transport can use"
+	}
+	return ""
+}
+
+// validHostPort is a host (a name, or an IPv6 address in brackets) and, after
+// a colon, a port of 1 to 65535: so not "x.test:" (the port's variable was
+// unset), ":8080", "x.test:abc" or "x.test:0".
+func validHostPort(hostport string) bool {
+	host, port, hasPort := hostport, "", false
+	if strings.HasPrefix(hostport, "[") {
+		end := strings.IndexByte(hostport, ']')
+		if end < 0 {
+			return false
+		}
+		if inner := hostport[1:end]; inner == "" || strings.Trim(inner, "0123456789abcdefABCDEF:.") != "" {
+			return false
+		}
+		if after := hostport[end+1:]; after != "" {
+			if after[0] != ':' {
+				return false
+			}
+			port, hasPort = after[1:], true
+		}
+	} else {
+		if colon := strings.IndexByte(hostport, ':'); colon >= 0 {
+			host, port, hasPort = hostport[:colon], hostport[colon+1:], true
+		}
+		if host == "" || strings.ContainsAny(host, "[]") {
+			return false
+		}
+	}
+	if !hasPort {
+		return true
+	}
+	if port == "" || strings.Trim(port, "0123456789") != "" {
+		return false
+	}
+	digits := strings.TrimLeft(port, "0")
+	if digits == "" || len(digits) > 5 {
+		return false
+	}
+	n, _ := strconv.Atoi(digits)
+	return n <= 65535
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
@@ -393,6 +496,80 @@ type call struct {
 	goneIsDone bool
 	// public: send to the rates host, with no key, following redirects.
 	public bool
+	// need is what a 2xx reply must be for this call (spec section 3.6); the
+	// zero value, for deletes, mutes and GetRates (which checks its own), is
+	// any JSON or nothing.
+	need need
+}
+
+// need is what a call needs of a 2xx reply: a JSON object holding field, of
+// kind (D4, X-1). A reply that is not that came from something other than the
+// API: it fails with http-<status>, is never retried, and the message says
+// what is wrong in this SDK's own words, quoting nothing of the reply.
+type need struct {
+	kind  needKind
+	field string
+}
+
+type needKind int
+
+const (
+	anyReply         needKind = iota // deletes and mutes resolve to nothing; GetRates checks its own
+	anObject                         // GetUsage, GetBalance
+	aNonEmptyString                  // token, roomId, id, streamId
+	aString                          // channel, which may be empty
+	anObjectField                    // room
+	anArray                          // rooms
+	anArrayOrNothing                 // participants, messages, muted, streams, series: missing is []
+)
+
+func needs(kind needKind, field string) need { return need{kind: kind, field: field} }
+
+// problem checks a 2xx reply's text. It returns what is wrong, or "" and the
+// reply as an object (nil for anyReply).
+func (n need) problem(text []byte) (string, map[string]json.RawMessage) {
+	if n.kind == anyReply {
+		return "", nil
+	}
+	// A JSON object is what decodes to a map: not an empty body, null, a list
+	// (which Go would also refuse), a string, a number or a boolean.
+	trimmed := bytes.TrimLeft(text, " \t\r\n")
+	var object map[string]json.RawMessage
+	if len(trimmed) == 0 || trimmed[0] != '{' || json.Unmarshal(text, &object) != nil || object == nil {
+		return replyNotAnObject, nil
+	}
+	if n.kind == anObject {
+		return "", object
+	}
+	raw, present := object[n.field]
+	raw = bytes.TrimSpace(raw)
+	first := byte(0)
+	if len(raw) > 0 {
+		first = raw[0]
+	}
+	switch n.kind {
+	case aNonEmptyString:
+		if first != '"' || len(raw) <= 2 {
+			return fmt.Sprintf("%q is not a non-empty string", n.field), nil
+		}
+	case aString:
+		if first != '"' {
+			return fmt.Sprintf("%q is not a string", n.field), nil
+		}
+	case anObjectField:
+		if first != '{' {
+			return fmt.Sprintf("%q is not an object", n.field), nil
+		}
+	case anArray:
+		if first != '[' {
+			return fmt.Sprintf("%q is not an array", n.field), nil
+		}
+	case anArrayOrNothing:
+		if present && first != '[' {
+			return fmt.Sprintf("%q is not an array", n.field), nil
+		}
+	}
+	return "", object
 }
 
 // do runs a call: serializes the body once, makes the attempts the retry
@@ -436,18 +613,8 @@ func (c *StreamClient) do(ctx context.Context, cl call, out any) (int, error) {
 		}
 		status, text, err := c.once(ctx, cl, body)
 		if err == nil {
-			if len(text) == 0 || out == nil {
-				return status, nil
-			}
-			if err := json.Unmarshal(text, out); err != nil {
-				// Valid JSON of another shape than the method's: something
-				// other than the API answered, and asking again gets the same.
-				return status, &Error{
-					Code:      fmt.Sprintf("http-%d", status),
-					Status:    status,
-					Message:   fmt.Sprintf("%s %s: the reply could not be decoded: %s", cl.method, cl.path, c.s.redact(err.Error())),
-					Retryable: false,
-				}
+			if err := c.decode(cl, status, text, out); err != nil {
+				return status, err
 			}
 			return status, nil
 		}
@@ -470,6 +637,46 @@ func (c *StreamClient) do(ctx context.Context, cl call, out any) (int, error) {
 		}
 	}
 	return last.Status, last
+}
+
+// decode checks a 2xx reply against what the call needs and decodes it into
+// out (a pointer, or nil for a call that resolves to nothing). Neither failure
+// is retried: something other than the API answered, and asking again gets
+// the same.
+func (c *StreamClient) decode(cl call, status int, text []byte, out any) *Error {
+	refuse := func(what string) *Error {
+		return &Error{Code: fmt.Sprintf("http-%d", status), Status: status, Message: fmt.Sprintf("%s %s: %s", cl.method, cl.path, what), Retryable: false}
+	}
+	problem, object := cl.need.problem(text)
+	if problem != "" {
+		return refuse(replyShapePrefix + problem)
+	}
+	if out == nil || len(text) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(text, out); err != nil {
+		// A field of another type than the model's, beyond what the check
+		// reads. The decoder's words name the field and the type; they are
+		// redacted all the same.
+		return refuse("the reply could not be decoded: " + c.s.redact(err.Error()))
+	}
+	// encoding/json matches a key to a field case-insensitively and keeps the
+	// last, so {"token":"t","Token":""} would hand back an empty token after
+	// the check passed "t". Where the reply spells the field more than one way,
+	// the exact key is decoded once more, alone: the model holds what the
+	// check read.
+	if raw, ok := object[cl.need.field]; ok && cl.need.field != "" {
+		for key := range object {
+			if key != cl.need.field && strings.EqualFold(key, cl.need.field) {
+				patch, _ := json.Marshal(map[string]json.RawMessage{cl.need.field: raw})
+				if err := json.Unmarshal(patch, out); err != nil {
+					return refuse("the reply could not be decoded: " + c.s.redact(err.Error()))
+				}
+				break
+			}
+		}
+	}
+	return nil
 }
 
 // backoffWait is the wait before retry n (1-based) without its jitter: 200 ms,

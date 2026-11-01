@@ -557,7 +557,10 @@ type StreamEvent struct {
 //
 // Optional fields are left out of the body when they are zero, never sent as
 // null (spec section 3.3): the server refuses unknown fields and nulls where it
-// expects a value. Ids that go into the path are tagged json:"-".
+// expects a value. Metadata that would encode as null (a nil map, slice or
+// pointer, a nil json.RawMessage, json.RawMessage("null")) counts as not given
+// and is left out too; omitempty alone drops only a nil interface (G012-4,
+// fixed in 0.1.3). Ids that go into the path are tagged json:"-".
 
 // CreateRoomParams is CreateRoom's argument.
 type CreateRoomParams struct {

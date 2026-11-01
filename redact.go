@@ -29,11 +29,18 @@ const (
 // A piece is one position of an encoded form of a key character: the byte
 // it must be, or either of two bytes where hex digits and the x of "&#x" may
 // be in either case. char is the character the piece stands for, which the
-// second-layer escapers key on.
+// second-layer escapers key on. A zeros piece is a run of any number of "0",
+// none included: the zeros a numeric reference may start with (&#x005F;,
+// &#0095;, N049-5). A digit other than 0 always follows one, so the run
+// matches one way and the match stays linear.
 type piece struct {
-	char byte
-	a, b byte
+	char  byte
+	a, b  byte
+	zeros bool
 }
+
+// zeros is the run of "0" before a numeric reference's digits.
+var zeros = piece{char: '0', a: '0', b: '0', zeros: true}
 
 // An alternative is one spelling of one key character: a fixed sequence of
 // pieces. No two alternatives of a character match the same text, so a match
@@ -141,16 +148,20 @@ func (r *keyRedactor) matchAt(text string, from int) int {
 }
 
 func matchAlternative(text string, at int, alt alternative) (int, bool) {
-	if at+len(alt) > len(text) {
-		return 0, false
-	}
-	for i, p := range alt {
-		c := text[at+i]
-		if c != p.a && c != p.b {
+	i := at
+	for _, p := range alt {
+		if p.zeros {
+			for i < len(text) && text[i] == '0' {
+				i++
+			}
+			continue
+		}
+		if i >= len(text) || (text[i] != p.a && text[i] != p.b) {
 			return 0, false
 		}
+		i++
 	}
-	return at + len(alt), true
+	return i, true
 }
 
 func containsInt(list []int, v int) bool {
@@ -277,18 +288,16 @@ func concat(parts ...alternative) alternative {
 // Python's quote and hand-rolled encoders.
 func percentOf(code int) alternative { return concat(exact("%"), hexPieces(code, 2)) }
 
-// hexReferenceOf is the HTML reference &#xH;, x and hex digits in either case.
+// hexReferenceOf is the HTML reference &#xH;, x and hex digits in either case,
+// with any number of zeros before the digits (&#x5F;, &#X005f;).
 func hexReferenceOf(code int) alternative {
-	return concat(exact("&#"), alternative{{char: 'x', a: 'x', b: 'X'}}, hexPieces(code, 1), exact(";"))
+	return concat(exact("&#"), alternative{{char: 'x', a: 'x', b: 'X'}, zeros}, hexPieces(code, 1), exact(";"))
 }
 
-// decimalReferenceOf is &#D;, zero-padded to width (PHP writes &#039;).
-func decimalReferenceOf(code int, width int) alternative {
-	d := itoa(code)
-	for len(d) < width {
-		d = "0" + d
-	}
-	return exact("&#" + d + ";")
+// decimalReferenceOf is &#D;, with any number of zeros before the digits
+// (&#95;, PHP's &#039;, &#00000095;).
+func decimalReferenceOf(code int) alternative {
+	return concat(exact("&#"), alternative{zeros}, exact(itoa(code)+";"))
 }
 
 // htmlNames are the HTML5 named references of the characters a key may hold,
@@ -324,29 +333,32 @@ var escapers = []escaper{
 	escaping(escapeCharacters, percentOf),
 	escaping("%\\\"&#;+", percentOf),
 	// JSON: JSON.stringify and json.dumps write \ as \\ and " as \"; Go's
-	// json.Marshal writes & as & too; PHP's json_encode writes / as \/.
-	{'\\': exact(`\\`), '"': exact(`\"`), '&': exact(`&`)},
+	// json.Marshal writes & as \u0026 too (written out here in Go's own
+	// escape; until 0.1.3 this entry was "&", which escaped nothing, and the
+	// key as sk\u0026lowbar;... went through whole, G012-2); PHP's
+	// json_encode writes / as \/.
+	{'\\': exact(`\\`), '"': exact(`\"`), '&': exact(`\u0026`)},
 	{'\\': exact(`\\`), '"': exact(`\"`), '/': exact(`\/`)},
 	// HTML: html.escape, htmlspecialchars and lodash write &quot;, Go &#34;.
 	{'&': exact("&amp;"), '"': exact("&quot;")},
 	{'&': exact("&amp;"), '"': exact("&#34;")},
 	escaping(escapeCharacters, func(code int) alternative { return exact("&" + htmlNames[byte(code)][0] + ";") }),
 	escaping(escapeCharacters, hexReferenceOf),
-	escaping(escapeCharacters, func(code int) alternative { return decimalReferenceOf(code, 1) }),
+	escaping(escapeCharacters, decimalReferenceOf),
 }
 
 // oneLayerForms is every form one escaper gives ch: itself; its byte as %XX
 // in either hex case; "+" for a space (form encoding); its JSON escapes
 // (JSON.stringify's \" and \t, PHP's \/, \uXXXX); and its HTML references:
-// each name, &#D; (and PHP's &#039;), &#xH; in either case.
+// each name, &#D; and &#xH; with any number of zeros before the digits (PHP's
+// &#039;), x and hex digits in either case.
 func oneLayerForms(ch byte) []alternative {
 	code := int(ch)
 	forms := []alternative{
 		exact(string(ch)),
 		percentOf(code),
 		concat(exact(`\u`), hexPieces(code, 4)),
-		decimalReferenceOf(code, 1),
-		decimalReferenceOf(code, 3),
+		decimalReferenceOf(code),
 		hexReferenceOf(code),
 	}
 	for _, name := range htmlNames[ch] {
@@ -411,6 +423,10 @@ func alternativesOf(ch byte) []alternative {
 func alternativeKey(alt alternative) string {
 	b := make([]byte, 0, len(alt)*2)
 	for _, p := range alt {
+		if p.zeros {
+			b = append(b, 0, 0) // no key byte is NUL
+			continue
+		}
 		b = append(b, p.a, p.b)
 	}
 	return string(b)
@@ -418,65 +434,138 @@ func alternativeKey(alt alternative) string {
 
 // --- URL credentials ---------------------------------------------------------
 
-// redactURLCredentials replaces scheme://user:pass@ with scheme://[redacted]@
-// in text (Node's URL_CREDENTIALS). A scheme is a letter followed by letters,
-// digits, "+", "." or "-", starting at the first letter of such a run, then
-// "://", then the user info up to the last "@" before whitespace, "/", "?" or
-// "#", so a password holding an @ is taken out whole. mailto:me@host and
-// https://host/a@b are untouched.
+// redactURLCredentials replaces the user info of every URL in text with
+// [redacted]: scheme://user:pass@ becomes scheme://[redacted]@ (spec section
+// 5.5, D7). A scheme is a letter followed by letters, digits, "+", "." or "-",
+// then "://". A password may hold "@", "/", "?" or "#" (N049-3), so the user
+// info is either
+//
+//   - anything without whitespace, "/", "?" or "#", up to the last "@" before
+//     them; or, when there is none,
+//   - "name:", then something that is not a port (not digits followed by "/",
+//     "?", "#", whitespace or the end), then anything without whitespace, up
+//     to the last "@".
+//
+// That is the Node SDK's pattern
+// (?i)([a-z][a-z0-9+.-]*://)(?:[^\s/?#]*@|[^\s/?#:]*:(?!\d*(?:[/?#\s]|$))\S*@)
+// replaced by $1[redacted]@, which RE2 cannot write (it has no lookahead): this
+// is that pattern as code, with the same results (TestD7_URLCredentialsAgree
+// WithThePattern, FuzzURLCredentials), whitespace being JavaScript's \s. So
+// https://host/a@b, https://host:8080/a@b, https://host?e=a@b and
+// mailto:me@host are left alone, and https://user:123/x@host, which reads as
+// a port and a path, is shown.
+//
+// Linear in the text, as Node's per-word run is: a match lies within one word
+// (a run of non-whitespace) and ends at an "@", so each word is read up to its
+// last "@" and a word with none is passed over. The second form always ends
+// at that last "@"; the first is found by one scan to the first "/", "?" or
+// "#", and the next "://" lies past that scan's end, so no text is read twice
+// for long. Run on a whole page from every "name:", the pattern took minutes.
 func redactURLCredentials(text string) string {
+	if !strings.Contains(text, "://") || strings.IndexByte(text, '@') < 0 {
+		return text
+	}
 	var out strings.Builder
-	start := 0
-	i := 0
-	for {
-		j := strings.Index(text[i:], "://")
-		if j < 0 {
-			break
-		}
-		j += i
-		// The run of scheme characters before "://", and its first letter.
-		runStart := j
-		for runStart > 0 && isSchemeByte(text[runStart-1]) {
-			runStart--
-		}
-		schemeStart := -1
-		for k := runStart; k < j; k++ {
-			if isASCIILetter(text[k]) {
-				schemeStart = k
-				break
-			}
-		}
-		afterScheme := j + 3
-		if schemeStart < 0 {
-			i = afterScheme
+	written := 0 // text[:written] is in out
+	for i := 0; i < len(text); {
+		r, size := utf8.DecodeRuneInString(text[i:])
+		if isPatternSpace(r) {
+			i += size
 			continue
 		}
-		// The user info: up to the last @ before a stop character.
-		end := afterScheme
+		end := i
 		for end < len(text) {
 			r, size := utf8.DecodeRuneInString(text[end:])
-			if r == '/' || r == '?' || r == '#' || unicode.IsSpace(r) {
+			if isPatternSpace(r) {
 				break
 			}
 			end += size
 		}
-		at := strings.LastIndexByte(text[afterScheme:end], '@')
-		if at < 0 {
-			i = afterScheme
-			continue
+		if last := strings.LastIndexByte(text[i:end], '@'); last >= 0 {
+			for _, m := range credentialsIn(text[i : i+last+1]) {
+				out.WriteString(text[written : i+m.userinfo])
+				out.WriteString(redactedMarker)
+				out.WriteByte('@')
+				written = i + m.end
+			}
 		}
-		at += afterScheme
-		out.WriteString(text[start:afterScheme])
-		out.WriteString(redactedMarker)
-		out.WriteByte('@')
-		start = at + 1
-		i = start
+		i = end
 	}
-	if start == 0 {
+	if written == 0 {
 		return text
 	}
-	out.WriteString(text[start:])
+	out.WriteString(text[written:])
 	return out.String()
+}
+
+// credential is one match in a word: the user info starts at userinfo and the
+// match ends at end, just after its "@".
+type credential struct{ userinfo, end int }
+
+// credentialsIn finds the matches of the pattern in word, which holds no
+// whitespace and ends at its last "@".
+func credentialsIn(word string) []credential {
+	var found []credential
+	for from := 0; ; {
+		j := strings.Index(word[from:], "://")
+		if j < 0 {
+			return found
+		}
+		j += from
+		userinfo := j + 3
+		// A scheme: the run of scheme characters before "://" holds a letter.
+		// (The pattern starts at the run's first letter; where it starts
+		// changes nothing, as the scheme is kept as it is.)
+		hasLetter := false
+		for k := j; k > from && isSchemeByte(word[k-1]); k-- {
+			if isASCIILetter(word[k-1]) {
+				hasLetter = true
+			}
+		}
+		if !hasLetter {
+			from = userinfo
+			continue
+		}
+		// The first form: up to the last "@" before "/", "?" or "#".
+		stop := strings.IndexAny(word[userinfo:], "/?#")
+		if stop < 0 {
+			stop = len(word)
+		} else {
+			stop += userinfo
+		}
+		if at := strings.LastIndexByte(word[userinfo:stop], '@'); at >= 0 {
+			found = append(found, credential{userinfo, userinfo + at + 1})
+			from = userinfo + at + 1
+			continue
+		}
+		// The second form: a name without ":", then ":" and no port, then up
+		// to the word's last "@", which is its end.
+		colon := strings.IndexByte(word[userinfo:stop], ':')
+		if colon >= 0 {
+			after := userinfo + colon + 1
+			d := after
+			for d < len(word) && '0' <= word[d] && word[d] <= '9' {
+				d++
+			}
+			if d < len(word) && word[d] != '/' && word[d] != '?' && word[d] != '#' {
+				return append(found, credential{userinfo, len(word)})
+			}
+		}
+		from = userinfo
+	}
+}
+
+// isPatternSpace is JavaScript's \s, the whitespace of the Node SDK's pattern:
+// Unicode's space separators, tab, line feed, vertical tab, form feed,
+// carriage return, U+2028, U+2029 and U+FEFF. Go's unicode.IsSpace differs on
+// two: it counts U+0085 and not U+FEFF. Either way a URL is cut at a space,
+// and the results here must be Node's.
+func isPatternSpace(r rune) bool {
+	switch r {
+	case '\t', '\n', '\v', '\f', '\r', ' ', 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF:
+		return true
+	}
+	return 0x2000 <= r && r <= 0x200A
 }
 
 func isASCIILetter(c byte) bool { return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') }

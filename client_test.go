@@ -114,7 +114,7 @@ func TestNewStreamClient_RetriesDefaultsAndRefusals(t *testing.T) {
 }
 
 func TestNewStreamClient_URLsTrailingSlashAndUnsetRates(t *testing.T) {
-	ft := scripted(jsonStep(200, map[string]any{}), jsonStep(200, map[string]any{"success": true, "data": map[string]any{}}))
+	ft := scripted(jsonStep(200, map[string]any{"rooms": []any{}}), jsonStep(200, map[string]any{"success": true, "data": map[string]any{}}))
 	c := newClient(t, ft, withRates("https://api.example.com/"))
 	if _, err := c.ListRooms(ctxBG); err != nil {
 		t.Fatal(err)
@@ -136,12 +136,18 @@ func TestNewStreamClient_URLsTrailingSlashAndUnsetRates(t *testing.T) {
 }
 
 func TestNewStreamClient_RefusesAnOriginThatIsNotAnHTTPURL(t *testing.T) {
-	// Beyond the spec: Node accepts any non-empty string and fails every call
-	// with the transport's words. Failing at startup is kinder, and the
-	// message never repeats the value, which may carry credentials.
-	for _, bad := range []string{"x.test", "ftp://x.test", "https://", "https://user:pw@"} {
+	// Spec section 2.2 (D8; this SDK did it from 0.1.0, the spec since
+	// 2026-10-31): refused at startup, and the message never repeats the
+	// value, which may carry credentials. The vectors options.baseUrls have
+	// every case (TestVectors_BaseURLs).
+	for bad, want := range map[string]string{
+		"x.test":           "BaseURL must be an absolute http or https URL",
+		"ftp://x.test":     "BaseURL must be an absolute http or https URL",
+		"https://":         "BaseURL must be an absolute http or https URL",
+		"https://user:pw@": "BaseURL must name a host, and a port only as a number from 1 to 65535",
+	} {
 		_, err := NewStreamClient(Config{BaseURL: bad, APIKey: testKey})
-		if err == nil || !strings.Contains(err.Error(), "BaseURL must be an absolute http or https URL") {
+		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q accepted or wrong error: %v", bad, err)
 		}
 		if strings.Contains(err.Error(), "pw") {
@@ -497,11 +503,13 @@ func TestReply_EmptyBodyResolvesToNothing(t *testing.T) {
 	if err := c.MuteChat(ctxBG, "c", "u"); err != nil {
 		t.Error(err)
 	}
-	// A typed result from an empty 2xx stays zero rather than failing.
+	// A call with a result needs an object: an empty 2xx is refused, once
+	// (D4; it resolved to an empty list until 0.1.3).
 	ft = scripted(step{status: 204})
 	people, err := newClient(t, ft).ListParticipants(ctxBG, "r")
-	if err != nil || len(people) != 0 {
-		t.Errorf("%v, %v", people, err)
+	expectError(t, err, "http-204", 204, false, "GET /v1/rooms/r/participants: the reply is not the expected shape: it is not an object")
+	if people != nil || ft.count() != 1 {
+		t.Errorf("%v after %d attempts", people, ft.count())
 	}
 }
 
@@ -543,10 +551,19 @@ func TestReply_ErrorShapesOfBothVoltKitAPIs(t *testing.T) {
 }
 
 func TestReply_ValidJSONOfAnotherShapeIsHTTPStatusNotRetried(t *testing.T) {
-	// Beyond the spec: Node hands back whatever JSON.parse gave; a typed SDK
-	// cannot, so it reports the decode failure as a non-retryable http-200.
+	// What the call needs is checked first, in this SDK's own words (spec
+	// section 3.6, vectors replies).
 	ft := scripted(rawStep(200, `"a string where a room was expected"`))
 	_, err := newClient(t, ft).GetRoom(ctxBG, "r")
+	expectError(t, err, "http-200", 200, false, "GET /v1/rooms/r: the reply is not the expected shape: it is not an object")
+	if ft.count() != 1 {
+		t.Errorf("%d attempts", ft.count())
+	}
+	// Beyond the spec: a field the check does not read but the typed model
+	// cannot hold. Node hands back whatever JSON.parse gave; a typed SDK
+	// cannot, so it reports the decode failure as a non-retryable http-200.
+	ft = scripted(rawStep(200, `{"room":{"createdAt":"yesterday"}}`))
+	_, err = newClient(t, ft).GetRoom(ctxBG, "r")
 	e := expectError(t, err, "http-200", 200, false, "")
 	if !strings.HasPrefix(e.Message, "GET /v1/rooms/r: the reply could not be decoded: ") || ft.count() != 1 {
 		t.Errorf("%q after %d attempts", e.Message, ft.count())
@@ -740,8 +757,8 @@ func TestMethods_ListsUnwrapAndAreEmptyWhenAbsent(t *testing.T) {
 			t.Errorf("%s: %s, want [] (never null)", name, j)
 		}
 	}
-	rooms, err := c.ListRooms(ctxBG)
-	if err != nil || rooms == nil {
+	rooms, err := newClient(t, scripted(jsonStep(200, map[string]any{"rooms": []any{}}))).ListRooms(ctxBG)
+	if err != nil || rooms == nil || rooms.Rooms == nil {
 		t.Errorf("ListRooms keeps the wrapper object: %v %v", rooms, err)
 	}
 }

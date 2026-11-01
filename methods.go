@@ -20,8 +20,9 @@ import (
 // Sent once, never retried: a lost reply would turn a success into a spurious
 // room-exists (see the README, "Calls that are never repeated").
 func (c *StreamClient) CreateRoom(ctx context.Context, params CreateRoomParams) (*RoomWithHostToken, error) {
+	params.Metadata = omitNull(params.Metadata)
 	var room RoomWithHostToken
-	if _, err := c.do(ctx, call{method: "POST", path: "/v1/rooms", body: params, hasBody: true}, &room); err != nil {
+	if _, err := c.do(ctx, call{method: "POST", path: "/v1/rooms", body: params, hasBody: true, need: needs(aNonEmptyString, "roomId")}, &room); err != nil {
 		return nil, err
 	}
 	room.Existed = false
@@ -32,12 +33,13 @@ func (c *StreamClient) CreateRoom(ctx context.Context, params CreateRoomParams) 
 // already exists: one round trip whether or not the host has been here
 // before. Existed says which happened. Metadata is applied only on creation.
 func (c *StreamClient) EnsureRoom(ctx context.Context, params EnsureRoomParams) (*RoomWithHostToken, error) {
+	params.Metadata = omitNull(params.Metadata)
 	id, err := segment("roomId", params.RoomID)
 	if err != nil {
 		return nil, err
 	}
 	var room RoomWithHostToken
-	status, err := c.do(ctx, call{method: "PUT", path: "/v1/rooms/" + id, body: params, hasBody: true, safeToRepeat: true}, &room)
+	status, err := c.do(ctx, call{method: "PUT", path: "/v1/rooms/" + id, body: params, hasBody: true, safeToRepeat: true, need: needs(aNonEmptyString, "roomId")}, &room)
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +56,7 @@ func (c *StreamClient) CreateToken(ctx context.Context, params CreateTokenParams
 		return nil, err
 	}
 	var token RoomToken
-	if _, err := c.do(ctx, call{method: "POST", path: "/v1/rooms/" + id + "/tokens", body: params, hasBody: true, safeToRepeat: true}, &token); err != nil {
+	if _, err := c.do(ctx, call{method: "POST", path: "/v1/rooms/" + id + "/tokens", body: params, hasBody: true, safeToRepeat: true, need: needs(aNonEmptyString, "token")}, &token); err != nil {
 		return nil, err
 	}
 	return &token, nil
@@ -69,7 +71,7 @@ func (c *StreamClient) GetRoom(ctx context.Context, roomID string) (*RoomView, e
 		return nil, err
 	}
 	var view RoomView
-	if _, err := c.do(ctx, call{method: "GET", path: "/v1/rooms/" + id, safeToRepeat: true}, &view); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: "/v1/rooms/" + id, safeToRepeat: true, need: needs(anObjectField, "room")}, &view); err != nil {
 		return nil, err
 	}
 	return &view, nil
@@ -78,7 +80,7 @@ func (c *StreamClient) GetRoom(ctx context.Context, roomID string) (*RoomView, e
 // ListRooms lists every live room of the project.
 func (c *StreamClient) ListRooms(ctx context.Context) (*RoomList, error) {
 	var list RoomList
-	if _, err := c.do(ctx, call{method: "GET", path: "/v1/rooms", safeToRepeat: true}, &list); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: "/v1/rooms", safeToRepeat: true, need: needs(anArray, "rooms")}, &list); err != nil {
 		return nil, err
 	}
 	return &list, nil
@@ -95,7 +97,7 @@ func (c *StreamClient) ListParticipants(ctx context.Context, roomID string) ([]P
 	var wrapper struct {
 		Participants []Participant `json:"participants"`
 	}
-	if _, err := c.do(ctx, call{method: "GET", path: "/v1/rooms/" + id + "/participants", safeToRepeat: true}, &wrapper); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: "/v1/rooms/" + id + "/participants", safeToRepeat: true, need: needs(anArrayOrNothing, "participants")}, &wrapper); err != nil {
 		return nil, err
 	}
 	return orEmpty(wrapper.Participants), nil
@@ -128,7 +130,7 @@ func (c *StreamClient) CreateChatToken(ctx context.Context, params CreateChatTok
 		return nil, err
 	}
 	var token ChatToken
-	if _, err := c.do(ctx, call{method: "POST", path: "/v1/chat/" + channel + "/tokens", body: params, hasBody: true, safeToRepeat: true}, &token); err != nil {
+	if _, err := c.do(ctx, call{method: "POST", path: "/v1/chat/" + channel + "/tokens", body: params, hasBody: true, safeToRepeat: true, need: needs(aNonEmptyString, "token")}, &token); err != nil {
 		return nil, err
 	}
 	return &token, nil
@@ -142,7 +144,7 @@ func (c *StreamClient) GetChatInfo(ctx context.Context, channel string) (*ChatIn
 		return nil, err
 	}
 	var info ChatInfo
-	if _, err := c.do(ctx, call{method: "GET", path: "/v1/chat/" + ch, safeToRepeat: true}, &info); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: "/v1/chat/" + ch, safeToRepeat: true, need: needs(aString, "channel")}, &info); err != nil {
 		return nil, err
 	}
 	return &info, nil
@@ -173,7 +175,7 @@ func (c *StreamClient) ListMessages(ctx context.Context, channel string, opts *L
 	var wrapper struct {
 		Messages []ChatMessage `json:"messages"`
 	}
-	if _, err := c.do(ctx, call{method: "GET", path: path, safeToRepeat: true}, &wrapper); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: path, safeToRepeat: true, need: needs(anArrayOrNothing, "messages")}, &wrapper); err != nil {
 		return nil, err
 	}
 	return orEmpty(wrapper.Messages), nil
@@ -184,12 +186,13 @@ func (c *StreamClient) ListMessages(ctx context.Context, channel string, opts *L
 // which exist to restrain clients. Sent once, never retried: a lost reply
 // would become the same message twice.
 func (c *StreamClient) SendMessage(ctx context.Context, params SendMessageParams) (*ChatMessage, error) {
+	params.Metadata = omitNull(params.Metadata)
 	channel, err := segment("channel", params.Channel)
 	if err != nil {
 		return nil, err
 	}
 	var message ChatMessage
-	if _, err := c.do(ctx, call{method: "POST", path: "/v1/chat/" + channel + "/messages", body: params, hasBody: true}, &message); err != nil {
+	if _, err := c.do(ctx, call{method: "POST", path: "/v1/chat/" + channel + "/messages", body: params, hasBody: true, need: needs(aNonEmptyString, "id")}, &message); err != nil {
 		return nil, err
 	}
 	return &message, nil
@@ -218,7 +221,7 @@ func (c *StreamClient) ListChatMutes(ctx context.Context, channel string) ([]str
 	var wrapper struct {
 		Muted []string `json:"muted"`
 	}
-	if _, err := c.do(ctx, call{method: "GET", path: "/v1/chat/" + ch + "/mutes", safeToRepeat: true}, &wrapper); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: "/v1/chat/" + ch + "/mutes", safeToRepeat: true, need: needs(anArrayOrNothing, "muted")}, &wrapper); err != nil {
 		return nil, err
 	}
 	return orEmpty(wrapper.Muted), nil
@@ -264,8 +267,9 @@ func (c *StreamClient) UnmuteChat(ctx context.Context, channel, identity string)
 // publish token; reading or listing a stream never does. Sent once, never
 // retried, for the reason CreateRoom is not.
 func (c *StreamClient) CreateStream(ctx context.Context, params CreateStreamParams) (*BroadcastStreamWithPublish, error) {
+	params.Metadata = omitNull(params.Metadata)
 	var stream BroadcastStreamWithPublish
-	if _, err := c.do(ctx, call{method: "POST", path: "/v1/streams", body: params, hasBody: true}, &stream); err != nil {
+	if _, err := c.do(ctx, call{method: "POST", path: "/v1/streams", body: params, hasBody: true, need: needs(aNonEmptyString, "streamId")}, &stream); err != nil {
 		return nil, err
 	}
 	return &stream, nil
@@ -278,7 +282,7 @@ func (c *StreamClient) GetStream(ctx context.Context, streamID string) (*Broadca
 		return nil, err
 	}
 	var stream BroadcastStream
-	if _, err := c.do(ctx, call{method: "GET", path: "/v1/streams/" + id, safeToRepeat: true}, &stream); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: "/v1/streams/" + id, safeToRepeat: true, need: needs(aNonEmptyString, "streamId")}, &stream); err != nil {
 		return nil, err
 	}
 	return &stream, nil
@@ -289,7 +293,7 @@ func (c *StreamClient) ListStreams(ctx context.Context) ([]BroadcastStream, erro
 	var wrapper struct {
 		Streams []BroadcastStream `json:"streams"`
 	}
-	if _, err := c.do(ctx, call{method: "GET", path: "/v1/streams", safeToRepeat: true}, &wrapper); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: "/v1/streams", safeToRepeat: true, need: needs(anArrayOrNothing, "streams")}, &wrapper); err != nil {
 		return nil, err
 	}
 	return orEmpty(wrapper.Streams), nil
@@ -297,12 +301,13 @@ func (c *StreamClient) ListStreams(ctx context.Context) ([]BroadcastStream, erro
 
 // UpdateStream changes who may watch, or the stream's metadata.
 func (c *StreamClient) UpdateStream(ctx context.Context, streamID string, patch UpdateStreamParams) (*BroadcastStream, error) {
+	patch.Metadata = omitNull(patch.Metadata)
 	id, err := segment("streamId", streamID)
 	if err != nil {
 		return nil, err
 	}
 	var stream BroadcastStream
-	if _, err := c.do(ctx, call{method: "PATCH", path: "/v1/streams/" + id, body: patch, hasBody: true, safeToRepeat: true}, &stream); err != nil {
+	if _, err := c.do(ctx, call{method: "PATCH", path: "/v1/streams/" + id, body: patch, hasBody: true, safeToRepeat: true, need: needs(aNonEmptyString, "streamId")}, &stream); err != nil {
 		return nil, err
 	}
 	return &stream, nil
@@ -328,7 +333,7 @@ func (c *StreamClient) CreateStreamToken(ctx context.Context, params CreateStrea
 		return nil, err
 	}
 	var token StreamToken
-	if _, err := c.do(ctx, call{method: "POST", path: "/v1/streams/" + id + "/tokens", body: params, hasBody: true, safeToRepeat: true}, &token); err != nil {
+	if _, err := c.do(ctx, call{method: "POST", path: "/v1/streams/" + id + "/tokens", body: params, hasBody: true, safeToRepeat: true, need: needs(aNonEmptyString, "token")}, &token); err != nil {
 		return nil, err
 	}
 	return &token, nil
@@ -340,7 +345,7 @@ func (c *StreamClient) CreateStreamToken(ctx context.Context, params CreateStrea
 // month and lifetime.
 func (c *StreamClient) GetUsage(ctx context.Context) (*UsageSummary, error) {
 	var usage UsageSummary
-	if _, err := c.do(ctx, call{method: "GET", path: "/v1/usage", safeToRepeat: true}, &usage); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: "/v1/usage", safeToRepeat: true, need: needs(anObject, "")}, &usage); err != nil {
 		return nil, err
 	}
 	return &usage, nil
@@ -357,7 +362,7 @@ func (c *StreamClient) GetUsageSeries(ctx context.Context, days int) ([]DailyUsa
 		Series []DailyUsage `json:"series"`
 	}
 	path := "/v1/usage/series?days=" + encodeSegment(strconv.Itoa(days))
-	if _, err := c.do(ctx, call{method: "GET", path: path, safeToRepeat: true}, &wrapper); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: path, safeToRepeat: true, need: needs(anArrayOrNothing, "series")}, &wrapper); err != nil {
 		return nil, err
 	}
 	return orEmpty(wrapper.Series), nil
@@ -370,7 +375,7 @@ func (c *StreamClient) GetUsageSeries(ctx context.Context, days int) ([]DailyUsa
 // this API. Amounts are cu as decimal strings; use ParseCu for arithmetic.
 func (c *StreamClient) GetBalance(ctx context.Context) (*ProjectBalance, error) {
 	var balance ProjectBalance
-	if _, err := c.do(ctx, call{method: "GET", path: "/v1/billing/balance", safeToRepeat: true}, &balance); err != nil {
+	if _, err := c.do(ctx, call{method: "GET", path: "/v1/billing/balance", safeToRepeat: true, need: needs(anObject, "")}, &balance); err != nil {
 		return nil, err
 	}
 	return &balance, nil
@@ -389,14 +394,17 @@ func (c *StreamClient) GetRates(ctx context.Context) (*RtcRates, error) {
 			Retryable: false,
 		}
 	}
-	var envelope struct {
-		Data json.RawMessage `json:"data"`
-	}
-	status, err := c.do(ctx, call{method: "GET", path: ratesPath, safeToRepeat: true, public: true}, &envelope)
+	var reply json.RawMessage
+	status, err := c.do(ctx, call{method: "GET", path: ratesPath, safeToRepeat: true, public: true}, &reply)
 	if err != nil {
 		return nil, err
 	}
-	data := bytes.TrimSpace(envelope.Data)
+	// The website API's envelope { success, data }: any reply that is not an
+	// object holding an object "data" (an empty body, null, a list, another
+	// API's object) carries no rates.
+	var envelope map[string]json.RawMessage
+	_ = json.Unmarshal(reply, &envelope)
+	data := bytes.TrimSpace(envelope["data"])
 	if len(data) == 0 || data[0] != '{' {
 		// Not the API's { success, data } envelope: RatesBaseURL most likely
 		// names some other service, and asking again gets the same answer.
@@ -417,6 +425,23 @@ func (c *StreamClient) GetRates(ctx context.Context) (*RtcRates, error) {
 		}
 	}
 	return &rates, nil
+}
+
+// omitNull is metadata as the body carries it: nil, so omitempty leaves the
+// field out, for anything that would encode as null (G012-4). omitempty drops
+// only a nil interface: a nil map, slice or pointer inside one, a nil
+// json.RawMessage or json.RawMessage("null") went out as "metadata":null, which
+// the server stores as the metadata, and which let a SendMessage with neither
+// text nor metadata pass the server's check for an empty message. A value that
+// json.Marshal refuses is kept, so the call fails before sending, as before.
+func omitNull(metadata any) any {
+	if metadata == nil {
+		return nil
+	}
+	if encoded, err := json.Marshal(metadata); err == nil && string(encoded) == "null" {
+		return nil
+	}
+	return metadata
 }
 
 // orEmpty turns a missing list into an empty one: the four list calls and

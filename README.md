@@ -108,9 +108,13 @@ err = client.DeleteRoom(ctx, "show-42")                // ends it for everyone
   leaves: delivery is at-least-once and unordered, so a counter built from
   events drifts.
 - `Metadata` is any value `encoding/json` can encode (a map, a struct, a
-  `json.RawMessage`); replies carry it back as `json.RawMessage`. Left nil, it
-  is left out of the body; a nil `json.RawMessage` or a typed nil pointer was
-  given, and is sent as `null`.
+  `json.RawMessage`); replies carry it back as `json.RawMessage`. Left nil, or
+  anything that would encode as `null` (a nil map, slice or pointer, a nil
+  `json.RawMessage`, `json.RawMessage("null")`), it is left out of the body,
+  never sent as `null` (until 0.1.3 a typed nil went out as `"metadata":null`,
+  which the server stored as the metadata, and which let a `SendMessage` with
+  neither text nor metadata through). This is true of every call that takes
+  `Metadata`.
 - Room ids are `[A-Za-z0-9._-]{1,128}` and scoped to your project: another
   project's room is a 404, never a 403.
 
@@ -211,7 +215,9 @@ library's `encoding/json`, whose rules differ from the other VoltKit SDKs' in
 ways only a reply that is not the API's can show. A JSON key matches a field
 **case-insensitively**, Unicode case folding included: `"Price"` and `"PRICE"`
 fill `Price`, and `"muſic"` (with a long s) fills `Music`; when a reply holds
-two spellings of one field, the last one wins. A key that appears twice keeps
+two spellings of one field, the last one wins, except the field a call needs
+(see [What a reply must hold](#what-a-reply-must-hold)), which is always the
+exact key's value. A key that appears twice keeps
 its last value, and a duplicated object is merged field by field rather than
 replaced. A field the struct does not have is dropped: an add-on id newer than
 this release is not in `Addons` (upgrade to read it). A number where the
@@ -276,19 +282,22 @@ client, err := voltkit.NewStreamClient(voltkit.Config{
 
 | Field | Default | What it does |
 | --- | --- | --- |
-| `BaseURL` | required | The controller's origin, exact scheme and host, as the Credentials tab shows it. The API key is sent here and nowhere else. A trailing `/` is dropped. |
+| `BaseURL` | required | The controller's origin, exact scheme and host, as the Credentials tab shows it. The API key is sent here and nowhere else. Whitespace at both ends (a line read from a file) and then one trailing `/` are dropped. It must be `http://` or `https://` (either case), a host (an IPv6 address in brackets included), a port of 1 to 65535 if any, and a path prefix if any, in ASCII, with no query or fragment; anything else fails in `NewStreamClient`, in words that never quote the URL. User info (`https://user:password@host`) is sent the way `net/http` sends it, as `Authorization: Basic`, beside the key, and is never shown. |
 | `APIKey` | required | Your project's API secret. Whitespace around it is ignored. |
-| `RatesBaseURL` | unset | The website API's origin, where `GetRates` reads the price list with no credential. `""` and `"/"` mean unset. |
+| `RatesBaseURL` | unset | The website API's origin, where `GetRates` reads the price list with no credential. Checked like `BaseURL`, except that nothing left (`""`, `"/"`, only whitespace) means unset. |
 | `Timeout` | 10 s | The deadline for each attempt, from sending the request to reading the last byte of the reply. Zero means the default; above 2^31−1 ms it is held there. |
 | `Retries` | `nil` = 2 | How many more attempts a call that is safe to repeat gets after a transient failure. `voltkit.Ptr(0)` turns retries off. |
 | `HTTPClient` | a fresh `http.Client` | Your own client, for a proxy, custom TLS or instrumentation. It is copied, never modified: the copy for the controller never follows a redirect, the copy for the rates host keeps your redirect policy, and both leave the deadline to the context. |
 
 The constructor checks every field and returns a plain `error` for a mistake,
 so a wrong value fails at startup instead of on a user's first call; none of
-these errors quotes the key. A `Config` prints under every `fmt` verb,
-marshals to JSON and logs through `log/slog` with the key hidden; it is still
-a plain struct, so keep it out of reflection-based dumps (see
-[Safe to log](#safe-to-log)). A client is safe to share between goroutines and
+these errors quotes the key or the URLs. A `Config` prints under every `fmt`
+verb, marshals to JSON and logs through `log/slog` with the key hidden; it is
+still a plain struct, so keep it out of reflection-based dumps (see
+[Safe to log](#safe-to-log)), and keep the `*StreamClient`, not the `Config`,
+in your own structs: `fmt` calls no method of a value it reaches through an
+unexported field, so `fmt.Sprintf("%+v", server{cfg})` prints `APIKey` as it
+is, while a `StreamClient` there shows no secret. A client is safe to share between goroutines and
 holds no state outside a call; it logs nothing. Every request carries
 `User-Agent: voltkit-rtc-go/<Version>` and nothing else about your system.
 
@@ -369,7 +378,7 @@ Every code a call can fail with, from the shared registry (`RESTErrorCodes`).
 | `network` | 0 | yes | No reply: DNS, a refused or dropped connection, the timeout. Try again later; if it persists, check your server's outbound network. |
 | `redirected` | 3xx | no | The server answered a request carrying the key with a redirect. Fix `BaseURL`: see [Redirects are never followed](#redirects-are-never-followed). |
 | `rates-unconfigured` | 0 | no | `GetRates` without `RatesBaseURL`. Set it to the website API's origin. |
-| `http-<status>` | that status | only a 429 or 5xx | A reply that named no code: a proxy's error page, a success that is not JSON, or a reply over 8 MiB, the most the SDK reads of any reply ("the reply is too large"). Check `BaseURL`, and anything between your server and VoltKit. |
+| `http-<status>` | that status | only a 429 or 5xx | A reply that named no code: a proxy's error page, a success that is not JSON, a success that is not what the call needs ("the reply is not the expected shape: `"token"` is not a non-empty string", see [What a reply must hold](#what-a-reply-must-hold)), or a reply over 8 MiB, the most the SDK reads of any reply ("the reply is too large"). Check `BaseURL`, and anything between your server and VoltKit. |
 | `RATE_LIMITED`, `NOT_FOUND`, ... | as sent | by status | The website API's own codes, from `GetRates`, passed through unchanged. |
 
 `ErrorCodes` is the whole shared registry in its order, `RESTErrorCodes` the
@@ -383,6 +392,36 @@ if _, known := voltkit.ErrorInfo(e.Code); known {
 }
 ```
 
+### What a reply must hold
+
+A `2xx` reply is checked before it is decoded, so a reply that is not the
+API's never comes back as a success with empty fields (until 0.1.3,
+`CreateToken` answered `{}` returned a `RoomToken` with an empty `Token` and
+no error, and `EnsureRoom` added `Existed` to it). Each call needs:
+
+| Calls | The reply must be |
+| --- | --- |
+| `CreateToken`, `CreateChatToken`, `CreateStreamToken` | an object with a non-empty string `token` |
+| `CreateRoom`, `EnsureRoom` | an object with a non-empty string `roomId` |
+| `GetRoom` | an object with an object `room` |
+| `ListRooms` | an object with an array `rooms` |
+| `GetChatInfo` | an object with a string `channel` (it may be empty) |
+| `SendMessage` | an object with a non-empty string `id` |
+| `CreateStream`, `GetStream`, `UpdateStream` | an object with a non-empty string `streamId` |
+| `GetUsage`, `GetBalance` | an object |
+| `ListParticipants`, `ListMessages`, `ListChatMutes`, `ListStreams`, `GetUsageSeries` | an object; its list missing is an empty slice, its list present and not an array (`null` included) is refused |
+| `DeleteRoom`, `DeleteMessage`, `MuteChat`, `UnmuteChat`, `DeleteStream` | anything, or nothing: they return only an error |
+| `GetRates` | an object with an object `data`, as before ("the reply carries no rates") |
+
+Anything else (an empty body, `null`, a list, a string, a number) fails with
+`*Error` code `http-<status>`, that status, `Retryable` false, after one
+attempt, and a message in the SDK's own words that quotes nothing of the
+reply: `POST /v1/rooms/show-42/tokens: the reply is not the expected shape:
+"token" is not a non-empty string`, or `...: it is not an object`. Fields the
+SDK does not know are still accepted. The controller always sends these
+fields, so this error means something other than the API answered: check
+`BaseURL` and any proxy in between.
+
 ### Mistakes caught before a request
 
 These are plain `error` values, never an `*Error`, so a handler cannot
@@ -391,14 +430,14 @@ quote the key.
 
 | Mistake | How it fails |
 | --- | --- |
-| `BaseURL` or `APIKey` empty; `BaseURL` or `RatesBaseURL` not an absolute http(s) URL with a host, or carrying a query or fragment (a path prefix is fine) | `NewStreamClient` returns an error |
+| `BaseURL` or `APIKey` empty; `BaseURL` only whitespace or a slash; `BaseURL` or `RatesBaseURL` not an absolute http(s) URL with a host, a port other than 1 to 65535 (`https://x.test:` when the port's variable was unset), a query or fragment, whitespace inside, a backslash, or a character outside ASCII (a path prefix is fine) | `NewStreamClient` returns an error that names the field and never quotes the URL |
 | `APIKey` only whitespace, such as a bare line break from a file | `NewStreamClient` returns an error |
 | `APIKey` holding a character no HTTP header can carry (a line break or NUL inside, another control character, DEL, anything above U+00FF), a backslash, or a character outside ASCII such as an accented letter (no VoltKit key holds one) | `NewStreamClient` returns an error saying to check how the key is loaded |
 | `Timeout` negative, `Retries` negative | `NewStreamClient` returns an error |
 | An id of `""`, `"."` or `".."` for a room, channel, message, identity or stream | The call returns `*Error` `bad-request`, `Status` 0, and sends nothing: a URL reads those as steps through the path. Every other id is percent-encoded and sent as given |
 | A body `encoding/json` cannot encode (a channel, a func, a cycle in `Metadata`) | The call returns a plain error naming it, such as `PUT /v1/rooms/show-42: the body cannot be sent as JSON: ...`, with the encoder's error wrapped |
 | `GetRates` without `RatesBaseURL` | The call returns `*Error` `rates-unconfigured`, `Status` 0 |
-| `VerifyWebhook` with no secret, or a negative `Tolerance` | Panics (a loud mistake, like the Node SDK's `TypeError`); `ParseWebhook` returns a plain error instead |
+| `VerifyWebhook` with no secret (none, only empty strings, or only whitespace-only ones), or a negative `Tolerance` | Panics (a loud mistake, like the Node SDK's `TypeError`); `ParseWebhook` returns a plain error instead |
 
 ## Retries
 
@@ -408,8 +447,8 @@ safe to repeat: token minting, reads (`GetBalance` and `GetRates` included),
 error (no reply, a dropped connection, the timeout), a `429`, or a `5xx` other
 than `billing-unavailable`, the one 503 that lasts until an operator acts.
 Any other `4xx` is a decision the server made and will make again;
-`redirected`, a `2xx` that is not JSON and a reply over 8 MiB (the most the
-SDK reads of any reply) are not transient either.
+`redirected`, a `2xx` that is not JSON or not what the call needs, and a reply
+over 8 MiB (the most the SDK reads of any reply) are not transient either.
 
 The waits are 200 ms, 400 ms, 800 ms, ... plus up to 100 ms at random, so a
 fleet of servers does not retry in step (the doubling is held at 2^31−1 ms,
@@ -517,8 +556,14 @@ your logger can take it whole. Wherever the transport, a dropped connection, a
 redirect or the service's reply quotes either one, `Message` and `Code` say
 `[redacted]` instead, however it was encoded: as is, URL-encoded by any
 encoder in either hex case, form-encoded, JSON-escaped (`\/`, `+`), as
-HTML character references (`&sol;`, `&#47;`, `&#x2F;`), or any of those
-escaped once more (`%252F`, `\&quot;`). A key over 256 characters is not
+HTML character references (`&sol;`, `&#47;`, `&#x2F;`, with any number of
+zeros before the digits: `&#x005F;`, `&#0095;`), or any of those escaped once
+more (`%252F`, `\&quot;`, and `\u0026lowbar;`, an HTML reference after Go's
+own JSON encoder, which writes `&` as `\u0026`). A URL's password is taken out
+even when it holds `@`, `/`, `?` or `#` (`https://user:p@ss/w?rd@host` shows as
+`https://[redacted]@host`); `https://host/a@b` and `https://host:8080/a@b` are
+left alone, and `https://user:123/x@host` reads as a port and a path, so it is
+shown. A key over 256 characters is not
 looked for: words at least as long as it are shown as
 `[not shown: it could not be checked for the API key]`, and shorter words,
 such as error codes, are kept; a key holding a tab could be split across
@@ -533,9 +578,15 @@ The client object keeps its secrets out of sight too. `String`, `GoString`,
 `voltkit.StreamClient{BaseURL: https://[redacted]@x.test, RatesBaseURL: unset, Timeout: 10s, Retries: 2}`
 and never the key. The key, the URLs as given and the redactor live in
 closures, which reflection cannot read: a debugger's variable view or a
-reflection-based dumper sees four function addresses. A `Config` prints,
+reflection-based dumper sees four function addresses, and a `StreamClient`
+in a field of your own, exported or not, prints no secret. A `Config` prints,
 marshals and logs the same way, but it is a plain struct whose `APIKey` field
-reflection can read, so keep a `Config` out of dumps. Requests still go to the
+reflection can read, and `fmt` calls none of its methods when it reaches the
+`Config` through an unexported field: `fmt.Sprintf("%+v", server{cfg})`, with
+`cfg` an unexported field of `server`, prints the key. Giving the key a type of
+its own would not help unless that type held no string at all, which would
+break every `Config{APIKey: os.Getenv(...)}`; so keep a `Config` out of dumps
+and out of your structs, and keep the `*StreamClient`. Requests still go to the
 URLs as given.
 
 What a call returns is another matter: `Token`, `HostToken` and
@@ -583,11 +634,15 @@ mux.HandleFunc("POST /hooks/voltkit", func(w http.ResponseWriter, r *http.Reques
   two header lines, pass `strings.Join(r.Header.Values("X-Stream-Signature"), ",")`
   instead: that is what the Node SDK does with a list.
 - **What it checks.** The timestamp must be within `Tolerance` of your clock
-  (`DefaultTolerance`, five minutes, in either direction, inclusive), so a
-  captured request cannot be replayed later, and a `v1` signature must match
-  one of your secrets, compared in constant time with `hmac.Equal`, every
-  secret against every signature. Empty entries in `secrets` are skipped, so
-  an unset `VOLTKIT_RTC_WEBHOOK_SECRET_OLD` is fine.
+  (`DefaultTolerance`, five minutes, in either direction, inclusive), in whole
+  seconds: `|floor(now) - t| <= Tolerance`, so 300.999 s old passes with the
+  default and a `Tolerance` of 0 accepts all of the current second. A captured
+  request cannot be replayed later, and a `v1` signature must match one of
+  your secrets, compared in constant time with `hmac.Equal`, every secret
+  against every signature. Empty and whitespace-only entries in `secrets` are
+  skipped (a whitespace-only secret never verifies anything), so an unset
+  `VOLTKIT_RTC_WEBHOOK_SECRET_OLD` is fine; with no other secret left, it is
+  the missing-secret mistake below.
 - **What it returns.** The event, or an `*Error` of code `bad-signature`
   (`Status` 401) when the delivery does not verify: answer 401, and VoltKit
   retries it. A plain error (no secret at all, a negative `Tolerance`, a
@@ -658,8 +713,8 @@ body yourself: `hex(HMAC-SHA256(secret, "<t>." + body))` in the header
 ## Versions
 
 `voltkit.Version` is the module's version, and `User-Agent:
-voltkit-rtc-go/<Version>` goes on every request. This is 0.1.2, at parity
-with `@voltkit-rtc/server` 0.4.9; [CHANGELOG.md](CHANGELOG.md) lists what each
+voltkit-rtc-go/<Version>` goes on every request. This is 0.1.3, at parity
+with `@voltkit-rtc/server` 0.4.10; [CHANGELOG.md](CHANGELOG.md) lists what each
 release changes. Until 1.0, a breaking change is a minor bump and everything
 else a patch.
 

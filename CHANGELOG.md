@@ -1,6 +1,62 @@
 # Changelog
 
-## 0.1.2 (prepared 2026-10-28, not published)
+## 0.1.3 (2026-10-31)
+
+From the testers' report of 2026-10-31 (G012-1 to G012-5, X-1, X-2) and the lead's decisions D4 to D9 of that
+round, at parity with `@voltkit-rtc/server` 0.4.10. Each fix has a test that failed on 0.1.2, in
+`round_2026_10_31_test.go`, and the shared vectors' new groups have loops in `vectors_test.go`.
+
+- **A 2xx reply that is not what the call needs is refused** (G012-1, X-1, D4). `CreateToken` answered `{}` returned
+  a `RoomToken` with an empty `Token` and a nil error; `EnsureRoom` then added `Existed`. Now each call checks the
+  reply before decoding it: a non-empty string `token` (the three token calls), `roomId` (`CreateRoom`,
+  `EnsureRoom`), `id` (`SendMessage`), `streamId` (`CreateStream`, `GetStream`, `UpdateStream`); an object `room`
+  (`GetRoom`); an array `rooms` (`ListRooms`); a string `channel` (`GetChatInfo`); an object (`GetUsage`,
+  `GetBalance`); and for the four lists and `GetUsageSeries`, an array or nothing (missing is still an empty slice;
+  `null` is refused). Anything else, an empty body and `null` included, fails with `http-<status>`, not retried,
+  `<METHOD> <path>: the reply is not the expected shape: "token" is not a non-empty string` (or `it is not an
+  object`), quoting nothing of the reply. Deletes and mutes take anything, as before; `GetRates` keeps its own
+  check and now says "carries no rates" for any JSON that is not its envelope (a list was "could not be decoded").
+  Where a reply spells the needed field twice in different case, the exact key's value is the one returned
+  (`encoding/json` matches case-insensitively and keeps the last). Vectors `replies` (356 cases), `TestVectors_Replies`.
+- **The key, HTML-escaped and then by Go's JSON encoder, was not redacted** (G012-2, Medium). The escaper for Go's
+  `json.Marshal` had `&` where it needed `\u0026`, so `sk\u0026lowbar;<rest of key>` reached `Error()`,
+  every `fmt` verb and JSON. One entry in `redact.go`, written out with its backslash. Numeric references with any
+  number of leading zeros (`&#x005F;`, `&#00000095;`, and those escaped again) are redacted too (N049-5).
+- **A webhook tolerance of 0 refused nearly every delivery** (G012-3, X-2). Freshness now compares whole seconds:
+  `|floor(now) - t| <= Tolerance`. A `Tolerance` of 0 accepts the whole current second (0 of 200 before), and
+  300.999 s old passes with the default, as `VerifyOptions` always promised. Vectors `webhooks.wholeSeconds`.
+- **A whitespace-only webhook secret is no secret** (D5). `" "` worked as an HMAC key; now it never verifies anything,
+  beside a real secret or alone, and with no other secret it is the missing-secret error (`VerifyWebhook` panics,
+  `ParseWebhook` returns a plain error). A secret with whitespace around real text stays the whole string.
+- **Metadata that would encode as `null` is left out** (G012-4). A nil map, slice or pointer in `Metadata`, a nil
+  `json.RawMessage` or `json.RawMessage("null")` went out as `"metadata":null`, which the server stored as the
+  metadata, and which let a `SendMessage` with neither text nor metadata past the server's empty-message check.
+  All five calls that take `Metadata`; the caller's params are not changed.
+- **URL passwords holding `@`, `/`, `?` or `#` are redacted whole** (D7, N049-3). `https://user:hunter2/x@h` showed
+  the password. The rule is the Node SDK's pattern, which RE2 cannot write (no lookahead), as linear code; 150,000
+  random strings gave Node's exact output, and a fuzz test compares it with a direct transcription of the pattern.
+  `https://h/a@b`, `https://h:8080/a@b` and `https://user:123/x@h` (a port and a path) are shown as they are.
+- **A bad `BaseURL` or `RatesBaseURL` fails in `NewStreamClient`, by the spec's rules** (D8). Whitespace at both
+  ends is dropped (a line read from a file), then one trailing slash. Refused, in words that never quote the URL: a
+  space, control character, backslash or character outside ASCII; no `http://` or `https://`; a query or fragment;
+  no host, or a port that is not 1 to 65535 (`https://x.test:` when the port's variable was unset); anything
+  `net/url` refuses. Only whitespace or a slash is "required" for `BaseURL` and unset for `RatesBaseURL`. User info
+  stays accepted: `net/http` sends it as `Authorization: Basic`, proved against a loopback server. Vectors
+  `options.baseUrls`.
+- **A `Config` in an unexported struct field prints its key** (G012-5): documented, not changed. `fmt` calls no
+  method of a value it reaches through an unexported field, so `fmt.Sprintf("%+v", server{cfg})` shows `APIKey`.
+  A key type of its own would hide it only if it held no string at all, which would break every
+  `Config{APIKey: os.Getenv(...)}`. `Config`'s doc comment and the README say to keep the `*StreamClient` instead,
+  which prints no secret wherever it sits; a test pins both.
+- D9, checked: Go has no frame locals for an error reporter to read. Every error value of eight failure modes was
+  walked by reflection, unexported fields and wrapped errors included: none holds the key or a URL password.
+- Ids (D6): a string id has no nil, so there is nothing to refuse beyond `""`, `"."` and `".."`. Vectors
+  `ids.numbers` are sent as their digits.
+- Example `tokenserver` answers 502 to the SDK's refused 2xx, as it did to an empty token.
+- The CHANGELOG shipped in `v0.1.2` read "prepared 2026-10-28, not published": 0.1.2 was published on 2026-10-28
+  as tag `v0.1.2`.
+
+## 0.1.2 (2026-10-28)
 
 - The Music add-on in `GetRates`. `RtcRates.Addons` (nil for a price list from before the add-on) carries
   `Music`, an `RtcAddonRate`: `Price` in credits per 1,000 participant-minutes while music plays (`"10.00"`),

@@ -316,7 +316,7 @@ func TestAdversarial_RedirectLoopsAndOddLocations(t *testing.T) {
 // --- (f) ids, origins and bodies -------------------------------------------------------
 
 func TestAdversarial_OddIDsOriginsAndBodies(t *testing.T) {
-	ft := scripted(jsonStep(200, map[string]any{}))
+	ft := scripted(jsonStep(200, map[string]any{"room": map[string]any{}, "rooms": []any{}}))
 	c := newClient(t, ft)
 	// A NUL and a byte that is not UTF-8 are bytes like any other: encoded, sent, no panic.
 	if _, err := c.GetRoom(ctxBG, "a\x00b\xffc"); err != nil {
@@ -345,7 +345,7 @@ func TestAdversarial_OddIDsOriginsAndBodies(t *testing.T) {
 		}
 	}
 	// A 1 MiB metadata is serialized once and resent byte for byte.
-	ft = scripted(errorStep(503, "unavailable", "x"), jsonStep(200, map[string]any{}))
+	ft = scripted(errorStep(503, "unavailable", "x"), jsonStep(200, map[string]any{"roomId": "r"}))
 	big := strings.Repeat("m", 1<<20)
 	if _, err := newClient(t, ft).EnsureRoom(ctxBG, EnsureRoomParams{RoomID: "r", HostIdentity: "h", Metadata: map[string]any{"blob": big}}); err != nil {
 		t.Fatal(err)
@@ -364,15 +364,16 @@ func TestAdversarial_OddIDsOriginsAndBodies(t *testing.T) {
 			t.Errorf("%s: %v after %d requests", name, err, ft.count())
 		}
 	}
-	// Zero-valued optional fields are left out. A field that was given as a nil
-	// json.RawMessage or a typed nil pointer is sent as null: it was given.
-	ft = scripted(jsonStep(200, map[string]any{}))
+	// Zero-valued optional fields are left out, and so is metadata that would
+	// encode as null, a nil json.RawMessage or a typed nil pointer included:
+	// until 0.1.3 those went out as "metadata":null (G012-4).
+	ft = scripted(jsonStep(200, map[string]any{"token": "t", "id": "1-0", "roomId": "r"}))
 	c = newClient(t, ft)
 	_, _ = c.CreateStreamToken(ctxBG, CreateStreamTokenParams{StreamID: "s", TTLSeconds: 0, Identity: ""})
 	_, _ = c.SendMessage(ctxBG, SendMessageParams{Channel: "c", Text: "hi", Ephemeral: false})
 	_, _ = c.EnsureRoom(ctxBG, EnsureRoomParams{RoomID: "r", HostIdentity: "h", Metadata: json.RawMessage(nil)})
 	_, _ = c.EnsureRoom(ctxBG, EnsureRoomParams{RoomID: "r", HostIdentity: "h", Metadata: (*struct{ A int })(nil)})
-	for i, want := range []string{`{}`, `{"text":"hi"}`, `{"hostIdentity":"h","metadata":null}`, `{"hostIdentity":"h","metadata":null}`} {
+	for i, want := range []string{`{}`, `{"text":"hi"}`, `{"hostIdentity":"h"}`, `{"hostIdentity":"h"}`} {
 		if got := string(ft.call(i).Body); got != want {
 			t.Errorf("body %d: %s, want %s", i, got, want)
 		}
@@ -387,19 +388,18 @@ func TestAdversarial_OddIDsOriginsAndBodies(t *testing.T) {
 // --- (g) replies of every wrong shape -----------------------------------------------------
 
 func TestAdversarial_RepliesOfEveryWrongShape(t *testing.T) {
-	for _, raw := range []string{`[]`, `"x"`, `123`, `true`, `{"room":"not an object"}`} {
+	// Not what GetRoom needs (an object with an object "room"): refused in this
+	// SDK's own words, once (D4; null resolved to a zero RoomView until 0.1.3).
+	for raw, what := range map[string]string{`[]`: "it is not an object", `"x"`: "it is not an object", `123`: "it is not an object",
+		`true`: "it is not an object", `null`: "it is not an object", `{"room":"not an object"}`: `"room" is not an object`} {
 		ft := scripted(rawStep(200, raw))
 		_, err := newClient(t, ft).GetRoom(ctxBG, "r")
 		e := expectError(t, err, "http-200", 200, false, "")
-		if !strings.HasPrefix(e.Message, "GET /v1/rooms/r: the reply could not be decoded: ") || ft.count() != 1 {
+		if e.Message != "GET /v1/rooms/r: the reply is not the expected shape: "+what || ft.count() != 1 {
 			t.Errorf("%s: %q after %d attempts", raw, e.Message, ft.count())
 		}
 	}
-	// null is the zero value, as Node hands back null.
-	view, err := newClient(t, scripted(rawStep(200, `null`))).GetRoom(ctxBG, "r")
-	if err != nil || view == nil || view.Room.RoomID != "" {
-		t.Errorf("%v %v", view, err)
-	}
+	var err error
 	// A byte-order mark makes it not JSON, as JSON.parse says too.
 	_, err = newClient(t, scripted(rawStep(200, "\xEF\xBB\xBF{}"))).ListRooms(ctxBG)
 	e := expectError(t, err, "http-200", 200, false, "")
@@ -442,7 +442,7 @@ func TestAdversarial_RepliesOfEveryWrongShape(t *testing.T) {
 		expectError(t, err, tc.code, 500, true, tc.message)
 	}
 	// Metadata comes back exactly as sent, whitespace and key order included.
-	view, err = newClient(t, scripted(rawStep(200, `{"room":{"metadata": { "b" : 1, "a" : [ ] }}}`))).GetRoom(ctxBG, "r")
+	view, err := newClient(t, scripted(rawStep(200, `{"room":{"metadata": { "b" : 1, "a" : [ ] }}}`))).GetRoom(ctxBG, "r")
 	if err != nil || string(view.Room.Metadata) != `{ "b" : 1, "a" : [ ] }` {
 		t.Errorf("%s %v", view.Room.Metadata, err)
 	}

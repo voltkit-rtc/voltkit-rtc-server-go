@@ -193,7 +193,7 @@ func TestTransport_WhatReachesTheWire(t *testing.T) {
 	}
 	srv := serve(t, func(w http.ResponseWriter, r *http.Request, _ int) {
 		seen.uri, seen.key, seen.ua, seen.ct = r.RequestURI, r.Header.Get("X-API-Key"), r.Header.Get("User-Agent"), r.Header.Get("Content-Type")
-		_, _ = w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{"room":{}}`))
 	})
 	c := liveClient(t, srv.URL, func(cfg *Config) { cfg.APIKey = " " + testKey + "\n" })
 	if _, err := c.GetRoom(ctxBG, "a b/c"); err != nil {

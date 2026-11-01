@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Webhooks (spec section 7): VoltKit signs every delivery with
@@ -29,9 +30,11 @@ const maxSignatureHeaderLength = 4096
 // VerifyOptions tunes VerifyWebhook and ParseWebhook. A nil *VerifyOptions is
 // the defaults.
 type VerifyOptions struct {
-	// Tolerance is the freshness window, inclusive at the boundary. nil means
-	// DefaultTolerance; Ptr(0) accepts only the current second; a negative
-	// duration is a mistake in your setup (it would refuse every delivery).
+	// Tolerance is the freshness window, in whole seconds of the clock and
+	// inclusive at the boundary: |floor(now) - t| <= Tolerance. nil means
+	// DefaultTolerance; Ptr(time.Duration(0)) accepts the current second, all
+	// of it; a negative duration is a mistake in your setup (it would refuse
+	// every delivery).
 	Tolerance *time.Duration
 	// Now is the clock; nil means time.Now. For tests.
 	Now func() time.Time
@@ -44,9 +47,11 @@ type VerifyOptions struct {
 // compared in constant time, and one match is enough.
 //
 // A mistake in the setup is loud, not a quiet false that would look like an
-// attack: it panics when secrets is empty or holds only empty strings, or when
-// Tolerance is negative, as the Node SDK throws a TypeError or RangeError. Use
-// ParseWebhook to get those as errors instead.
+// attack: it panics when secrets is empty or holds only empty or
+// whitespace-only strings (a whitespace-only secret counts as absent, and
+// never verifies anything), or when Tolerance is negative, as the Node SDK
+// throws a TypeError or RangeError. Use ParseWebhook to get those as errors
+// instead.
 func VerifyWebhook(body []byte, header string, secrets []string, opts *VerifyOptions) bool {
 	ok, err := verifyWebhook(body, header, secrets, opts)
 	if err != nil {
@@ -76,9 +81,14 @@ func ParseWebhook(body []byte, header string, secrets []string, opts *VerifyOpti
 }
 
 func verifyWebhook(body []byte, header string, secrets []string, opts *VerifyOptions) (bool, error) {
+	// A secret that is empty or only whitespace is no secret (D5, X-4): HMAC
+	// would take " " as a key, and a delivery signed with it verified. It never
+	// verifies anything, beside a real secret or alone; with no other secret,
+	// it is the missing-secret error. A real secret with whitespace around it
+	// stays the whole string.
 	var live []string
 	for _, s := range secrets {
-		if s != "" {
+		if strings.TrimFunc(s, isBlankRune) != "" {
 			live = append(live, s)
 		}
 	}
@@ -130,20 +140,28 @@ func verifyWebhook(body []byte, header string, secrets []string, opts *VerifyOpt
 	return matched, nil
 }
 
+// isBlankRune is whitespace for a webhook secret: Go's unicode.IsSpace and
+// JavaScript's (which adds U+FEFF), so a secret the Node SDK counts as absent
+// is absent here too.
+func isBlankRune(r rune) bool { return unicode.IsSpace(r) || r == 0xFEFF }
+
 // fresh reports whether a delivery stamped ts (unix seconds) is within
-// tolerance of now, in either direction, inclusive at the boundary. Integer
+// tolerance of now, in either direction, inclusive at the boundary, in whole
+// seconds: |floor(now) - ts| <= tolerance (spec section 7). The timestamp is a
+// whole second; a now with its fraction refused every same-second delivery at
+// a tolerance of 0, and 300.5 s at the default (G012-3, X-2). Integer
 // arithmetic rather than now.Sub(time.Unix(ts, 0)): a Duration saturates at
 // about 292 years, and the negation of its minimum is itself, still negative,
 // so with a 15-digit timestamp (31 million years ahead) or a clock at the
 // zero time an abs() of the saturated difference would pass the comparison.
 func fresh(now time.Time, ts int64, tolerance time.Duration) bool {
-	// The most whole seconds a Duration holds, less one for the nanoseconds.
-	const maxSeconds = int64(math.MaxInt64/int64(time.Second)) - 1
-	seconds := now.Unix() - ts
+	// The most whole seconds a Duration holds.
+	const maxSeconds = int64(math.MaxInt64 / int64(time.Second))
+	seconds := now.Unix() - ts // Unix() is floor(now) for any time, before 1970 too
 	if seconds > maxSeconds || seconds < -maxSeconds {
 		return false // beyond anything a tolerance can express
 	}
-	age := time.Duration(seconds)*time.Second + time.Duration(now.Nanosecond())
+	age := time.Duration(seconds) * time.Second
 	if age < 0 {
 		age = -age
 	}

@@ -94,7 +94,8 @@ func join(client *voltkit.StreamClient) http.HandlerFunc {
 
 // writeError maps a failed call to an answer for the client, by code: the
 // room is gone (404), the account is out of minutes or credits (402), the
-// SDK's retries are spent and later may work (503 with Retry-After), and
+// SDK's retries are spent and later may work (503 with Retry-After), a 2xx
+// that held no token (the SDK refuses it as http-200 from 0.1.3: 502), and
 // everything else (a wrong key, a suspended account, a bad call) is this
 // server's problem, answered as a 500 that gives nothing away.
 func writeError(w http.ResponseWriter, err error) {
@@ -117,6 +118,8 @@ func writeError(w http.ResponseWriter, err error) {
 	case e.Retryable: // network, 429, 5xx: the SDK has already retried
 		w.Header().Set("Retry-After", "10")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "try again in a moment"})
+	case e.Status >= 200 && e.Status < 300: // http-200: the reply was no token (not JSON, or no "token"), refused by the SDK
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the RTC service returned an incomplete token; try again"})
 	default: // unauthorized, tenant-suspended, bad-request, ...: fix the server, tell the user nothing
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "something went wrong"})
 	}
