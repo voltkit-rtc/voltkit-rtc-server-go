@@ -420,7 +420,7 @@ func (c *StreamClient) GetRates(ctx context.Context) (*RtcRates, error) {
 		return nil, &Error{
 			Code:      fmt.Sprintf("http-%d", status),
 			Status:    status,
-			Message:   fmt.Sprintf("GET %s: the reply could not be decoded: %s", ratesPath, c.s.redact(err.Error())),
+			Message:   fmt.Sprintf("GET %s: the reply could not be decoded: %s", ratesPath, decodeProblem(err, &rates, "data object")),
 			Retryable: false,
 		}
 	}

@@ -222,7 +222,13 @@ its last value, and a duplicated object is merged field by field rather than
 replaced. A field the struct does not have is dropped: an add-on id newer than
 this release is not in `Addons` (upgrade to read it). A number where the
 struct has a string (a price, a cu amount) is refused with `http-<status>`
-rather than converted, so a string field is always the server's own text. The
+rather than converted, so a string field is always the server's own text. That
+refusal is in the SDK's words and quotes nothing of the reply, however long a
+number it holds: `the reply could not be decoded: "wallet.scopes": JSON type
+number, where this SDK reads voltkit.WalletScopeAmount (byte 53 of the reply)`
+names the SDK's own field path (it stops at a map, whose keys are the reply's),
+the JSON type seen, the Go type wanted and the byte offset (until 0.1.3 the
+decoder's own words were passed on, which quote a number literal whole). The
 API sends exact lower-camel-case keys once each, so none of this changes what
 a real reply decodes to.
 
@@ -378,7 +384,7 @@ Every code a call can fail with, from the shared registry (`RESTErrorCodes`).
 | `network` | 0 | yes | No reply: DNS, a refused or dropped connection, the timeout. Try again later; if it persists, check your server's outbound network. |
 | `redirected` | 3xx | no | The server answered a request carrying the key with a redirect. Fix `BaseURL`: see [Redirects are never followed](#redirects-are-never-followed). |
 | `rates-unconfigured` | 0 | no | `GetRates` without `RatesBaseURL`. Set it to the website API's origin. |
-| `http-<status>` | that status | only a 429 or 5xx | A reply that named no code: a proxy's error page, a success that is not JSON, a success that is not what the call needs ("the reply is not the expected shape: `"token"` is not a non-empty string", see [What a reply must hold](#what-a-reply-must-hold)), or a reply over 8 MiB, the most the SDK reads of any reply ("the reply is too large"). Check `BaseURL`, and anything between your server and VoltKit. |
+| `http-<status>` | that status | only a 429 or 5xx | A reply that named no code: a proxy's error page, a success that is not JSON, a success that is not what the call needs ("the reply is not the expected shape: `"token"` is not a non-empty string", see [What a reply must hold](#what-a-reply-must-hold)), a success with a field that does not fit the typed struct ("the reply could not be decoded: `"members"`: JSON type string, where this SDK reads int (byte 31 of the reply)", quoting nothing of the reply), or a reply over 8 MiB, the most the SDK reads of any reply ("the reply is too large"). Check `BaseURL`, and anything between your server and VoltKit. |
 | `RATE_LIMITED`, `NOT_FOUND`, ... | as sent | by status | The website API's own codes, from `GetRates`, passed through unchanged. |
 
 `ErrorCodes` is the whole shared registry in its order, `RESTErrorCodes` the
@@ -646,7 +652,10 @@ mux.HandleFunc("POST /hooks/voltkit", func(w http.ResponseWriter, r *http.Reques
 - **What it returns.** The event, or an `*Error` of code `bad-signature`
   (`Status` 401) when the delivery does not verify: answer 401, and VoltKit
   retries it. A plain error (no secret at all, a negative `Tolerance`, a
-  verified body that is not JSON) is a mistake in your setup.
+  verified body that is not JSON) is a mistake in your setup. The not-JSON
+  error names the SDK's field, the JSON type seen and the byte (`"createdAt":
+  JSON type string, where this SDK reads int64 (byte 70 of the body)`), never
+  the body's text, and wraps no other error.
 - **`VerifyWebhook`** takes the same arguments and returns `true` or `false`
   instead of the event; a mistake in the setup makes it panic rather than
   return a `false` that would look like an attack.
@@ -713,8 +722,8 @@ body yourself: `hex(HMAC-SHA256(secret, "<t>." + body))` in the header
 ## Versions
 
 `voltkit.Version` is the module's version, and `User-Agent:
-voltkit-rtc-go/<Version>` goes on every request. This is 0.1.3, at parity
-with `@voltkit-rtc/server` 0.4.10; [CHANGELOG.md](CHANGELOG.md) lists what each
+voltkit-rtc-go/<Version>` goes on every request. This is 0.1.4, at parity
+with `@voltkit-rtc/server` 0.4.11; [CHANGELOG.md](CHANGELOG.md) lists what each
 release changes. Until 1.0, a breaking change is a minor bump and everything
 else a patch.
 

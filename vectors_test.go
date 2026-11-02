@@ -190,6 +190,15 @@ type vectorFile struct {
 			Credentials struct {
 				URLs []string `json:"urls"`
 			} `json:"credentials"`
+			HostCharacters struct {
+				Refused []struct {
+					Name     string `json:"name"`
+					BaseURL  string `json:"baseUrl"`
+					Expected struct {
+						ProgrammerError bool `json:"programmerError"`
+					} `json:"expected"`
+				} `json:"refused"`
+			} `json:"hostCharacters"`
 		} `json:"baseUrls"`
 	} `json:"options"`
 	IDs struct {
@@ -833,6 +842,44 @@ func TestVectors_BaseURLs(t *testing.T) {
 			}
 			if errors.Unwrap(err) != nil {
 				t.Errorf("refused %q as %s: the error wraps another, which may quote the URL", tc.Name, field)
+			}
+		}
+	}
+	// options.baseUrls.hostCharacters (round of 2026-11-01, PY013-2): a host
+	// holding |, ^ or a percent sign that encodes nothing is refused at
+	// construction by every SDK, each in its own words (here, net/url's
+	// parser behind the same "not shown here" message as refused), and no
+	// message quotes the URL.
+	if len(b.HostCharacters.Refused) == 0 {
+		t.Fatalf("options.baseUrls.hostCharacters is incomplete")
+	}
+	for _, tc := range b.HostCharacters.Refused {
+		if !tc.Expected.ProgrammerError {
+			t.Fatalf("hostCharacters %q: not a programmer error in the vectors", tc.Name)
+		}
+		host := strings.TrimPrefix(tc.BaseURL, "http://")
+		for _, field := range []string{"BaseURL", "RatesBaseURL"} {
+			cfg := Config{BaseURL: "https://x.test", APIKey: testKey}
+			if field == "BaseURL" {
+				cfg.BaseURL = tc.BaseURL
+			} else {
+				cfg.RatesBaseURL = tc.BaseURL
+			}
+			c, err := NewStreamClient(cfg)
+			var e *Error
+			if err == nil || errors.As(err, &e) {
+				t.Errorf("hostCharacters %q as %s: %v, %v; want a plain error", tc.Name, field, c, err)
+				continue
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "Config."+field+" ") || !strings.Contains(msg, "it is not shown here") {
+				t.Errorf("hostCharacters %q as %s: %q, want Config.%s ... (it is not shown here ...)", tc.Name, field, msg, field)
+			}
+			if strings.Contains(msg, tc.BaseURL) || strings.Contains(msg, host) {
+				t.Errorf("hostCharacters %q as %s: the message quotes the URL: %q", tc.Name, field, msg)
+			}
+			if errors.Unwrap(err) != nil {
+				t.Errorf("hostCharacters %q as %s: the error wraps another, which may quote the URL", tc.Name, field)
 			}
 		}
 	}

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -656,9 +657,9 @@ func (c *StreamClient) decode(cl call, status int, text []byte, out any) *Error 
 	}
 	if err := json.Unmarshal(text, out); err != nil {
 		// A field of another type than the model's, beyond what the check
-		// reads. The decoder's words name the field and the type; they are
-		// redacted all the same.
-		return refuse("the reply could not be decoded: " + c.s.redact(err.Error()))
+		// reads. In the SDK's own words: the decoder's quote the reply
+		// (G013-1).
+		return refuse("the reply could not be decoded: " + decodeProblem(err, out, "reply"))
 	}
 	// encoding/json matches a key to a field case-insensitively and keeps the
 	// last, so {"token":"t","Token":""} would hand back an empty token after
@@ -670,13 +671,158 @@ func (c *StreamClient) decode(cl call, status int, text []byte, out any) *Error 
 			if key != cl.need.field && strings.EqualFold(key, cl.need.field) {
 				patch, _ := json.Marshal(map[string]json.RawMessage{cl.need.field: raw})
 				if err := json.Unmarshal(patch, out); err != nil {
-					return refuse("the reply could not be decoded: " + c.s.redact(err.Error()))
+					return refuse("the reply could not be decoded: " + decodeProblem(err, out, strconv.Quote(cl.need.field)+" field"))
 				}
 				break
 			}
 		}
 	}
 	return nil
+}
+
+// decodeProblem is the SDK's own words for a json.Unmarshal failure, built
+// from the error's fields and never from its text (spec section 3.6, G013-1,
+// G013-2). The standard decoder quotes a mismatched number literal whole, so a
+// reply within the 8 MiB cap gave an Error() of that size; and from Go 1.25 on
+// (encoding/json on its v2 implementation) its field path holds map keys, list
+// indexes and the reply's own spelling of a case-folded key. What is kept
+// locates a real mismatch: the SDK's own field path (modelField), the JSON
+// type seen, the Go type wanted and the byte offset. in is what the offset
+// counts from: "reply", "body", "data object".
+func decodeProblem(err error, out any, in string) string {
+	var mismatch *json.UnmarshalTypeError
+	var syntax *json.SyntaxError
+	switch {
+	case errors.As(err, &mismatch):
+		seen, _, _ := strings.Cut(mismatch.Value, " ") // "number 123..." -> "number"
+		wanted := "a value"
+		if mismatch.Type != nil {
+			wanted = mismatch.Type.String()
+		}
+		where := ""
+		if field := modelField(reflect.TypeOf(out), mismatch.Field); field != "" {
+			where = strconv.Quote(field) + ": "
+		}
+		return fmt.Sprintf("%sJSON type %s, where this SDK reads %s (byte %d of the %s)", where, seen, wanted, mismatch.Offset, in)
+	case errors.As(err, &syntax):
+		// Its text names the character it found: a byte of the reply.
+		return fmt.Sprintf("the JSON breaks at byte %d of the %s", syntax.Offset, in)
+	default:
+		// A programming error (json.InvalidUnmarshalError) or an
+		// unmarshaler's own words, which could quote the reply: the kind
+		// of error, nothing more.
+		return fmt.Sprintf("the decoder failed with a %T", err)
+	}
+}
+
+// modelField is the decoder's field path in the SDK's own terms: each segment
+// is matched against the fields of the SDK's types the way encoding/json
+// matches a key (the exact JSON name, else case-insensitively), and the SDK's
+// spelling is what comes out. A list index (Go 1.25+'s decoder writes them)
+// and the Go name of an embedded struct (older decoders write them) are
+// stepped over. A map ends the path, since what follows is a key from the
+// reply; so does a segment that names nothing of the SDK's. Nothing the
+// decoder copied from the reply is repeated.
+func modelField(t reflect.Type, path string) string {
+	if t == nil || path == "" {
+		return ""
+	}
+	var own []string
+	for _, seg := range strings.Split(path, ".") {
+		t = indirect(t)
+		if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+			t = indirect(t.Elem())
+			if isIndex(seg) {
+				continue
+			}
+		}
+		if t.Kind() != reflect.Struct {
+			break
+		}
+		if f, name, ok := jsonField(t, seg); ok {
+			own = append(own, name)
+			t = f.Type
+			continue
+		}
+		if f, ok := t.FieldByName(seg); ok && f.Anonymous && indirect(f.Type).Kind() == reflect.Struct {
+			// An embedded struct's own name: its fields are promoted, so
+			// it is no level of the reply.
+			t = f.Type
+			continue
+		}
+		break
+	}
+	return strings.Join(own, ".")
+}
+
+// jsonField finds the field of struct t that encoding/json fills for the key
+// seg, promoted fields of embedded structs included: by its JSON name exactly,
+// else case-insensitively (strings.EqualFold, which is the decoder's
+// bytes.EqualFold). It returns the field and the SDK's spelling of its name.
+func jsonField(t reflect.Type, seg string) (reflect.StructField, string, bool) {
+	var folded reflect.StructField
+	foldedName := ""
+	for _, f := range reflect.VisibleFields(t) {
+		name, ok := jsonName(t, f)
+		if !ok {
+			continue
+		}
+		if name == seg {
+			return f, name, true
+		}
+		if foldedName == "" && strings.EqualFold(name, seg) {
+			folded, foldedName = f, name
+		}
+	}
+	return folded, foldedName, foldedName != ""
+}
+
+// jsonName is the JSON name of a visible field of t, or false for one that
+// encoding/json fills no key into: an unexported field, a field tagged "-",
+// an untagged embedded struct (its fields are visible on their own) and a
+// field inside an embedded struct that has a JSON name of its own (the
+// decoder treats that struct as one named field).
+func jsonName(t reflect.Type, f reflect.StructField) (string, bool) {
+	if !f.IsExported() {
+		return "", false
+	}
+	tag, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+	if tag == "-" {
+		return "", false
+	}
+	if f.Anonymous && tag == "" && indirect(f.Type).Kind() == reflect.Struct {
+		return "", false
+	}
+	for i := 1; i < len(f.Index); i++ {
+		if through, _, _ := strings.Cut(t.FieldByIndex(f.Index[:i]).Tag.Get("json"), ","); through != "" {
+			return "", false
+		}
+	}
+	if tag != "" {
+		return tag, true
+	}
+	return f.Name, true
+}
+
+// indirect is t without its pointers.
+func indirect(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t
+}
+
+// isIndex reports a path segment that is a list index: digits only.
+func isIndex(seg string) bool {
+	if seg == "" {
+		return false
+	}
+	for i := 0; i < len(seg); i++ {
+		if seg[i] < '0' || seg[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // backoffWait is the wait before retry n (1-based) without its jitter: 200 ms,

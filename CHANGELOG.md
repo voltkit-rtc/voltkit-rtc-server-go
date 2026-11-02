@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.4 (2026-11-02)
+
+From the testers' report of 2026-11-01 (G013-1, G013-2) and the lead's decision D11 of that round. Each fix has a
+test that failed on 0.1.3, in `round_2026_11_01_test.go`. No behaviour of a call changes: only the words of two errors.
+
+- **A decode error never quotes the reply** (G013-1, Low, hardening). A 2xx reply with a field that does not fit the
+  typed struct was refused with `encoding/json`'s own words, which quote a mismatched number literal whole: a reply
+  within the 8 MiB cap gave an `Error()` of up to 8 MiB; and from Go 1.25 on, where `encoding/json` runs on its v2
+  implementation, the decoder's path holds map keys, list indexes and the reply's own spelling of a case-folded key.
+  The message is now in the SDK's words, under 300 bytes whatever the reply holds: the SDK's own field path (it
+  stops at a map, whose keys are the reply's; list indexes and embedded struct names are stepped over, and the SDK's
+  spelling is kept), the JSON type seen, the Go type wanted and the byte offset, enough to find a real mismatch:
+  `GET /v1/billing/balance: the reply could not be decoded: "wallet.scopes": JSON type number, where this SDK reads
+  voltkit.WalletScopeAmount (byte 53 of the reply)`. The same words at `GetRates`'s decode of the envelope's `data`
+  object ("of the data object"). No real path: the controller sends no such reply; a rewriting proxy or a wrong
+  `BaseURL` could.
+- **`ParseWebhook`'s not-JSON error never quotes the body** (G013-2, Low, hardening). A validly signed body holding a
+  huge number gave an error the size of the number. Now `voltkit: the webhook body is not JSON: "createdAt": JSON
+  type string, where this SDK reads int64 (byte 70 of the body)`, and a body that is not JSON at all says `the JSON
+  breaks at byte 2 of the body`, not the character found there. A signed good event parses as before.
+  **Behaviour change:** the error no longer wraps the decoder's error, so `errors.As` for `*json.SyntaxError` (or
+  `*json.UnmarshalTypeError`) on it stops matching; `ParseWebhook` only ever promised a plain error.
+- Checked on go1.27.3 (the toolchain here, `encoding/json` v2-backed) and go1.25.14 (the v1 decoder: embedded struct
+  names in the path, no indexes); `TestDecode_ModelFieldWalksTheSDKsTypesOnly` walks both path styles on any Go.
+  Go 1.22 and 1.24 were not available on the machine that prepared this release.
+- The shared vectors' new group `options.baseUrls.hostCharacters` (a host holding `|`, `^` or a percent sign that
+  encodes nothing, refused at construction by every SDK, PY013-2) has its loop in `TestVectors_BaseURLs`: Go refused
+  all three already, in its own words, and no message quotes the URL.
+
 ## 0.1.3 (2026-10-31)
 
 From the testers' report of 2026-10-31 (G012-1 to G012-5, X-1, X-2) and the lead's decisions D4 to D9 of that

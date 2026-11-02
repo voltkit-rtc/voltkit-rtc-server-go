@@ -64,7 +64,10 @@ func VerifyWebhook(body []byte, header string, secrets []string, opts *VerifyOpt
 // cannot forget to check. A delivery that does not verify fails with an
 // *Error of code bad-signature and status 401: answer 401, and VoltKit retries
 // it. A mistake in the setup (no secret, a negative Tolerance, a verified body
-// that is not JSON) is a plain error, never an *Error.
+// that is not JSON) is a plain error, never an *Error. The not-JSON error
+// names the SDK's field, the JSON type seen and the byte, never the body's
+// text, and wraps no other error (until 0.1.3 it wrapped the decoder's, which
+// quoted a number literal whole).
 func ParseWebhook(body []byte, header string, secrets []string, opts *VerifyOptions) (*StreamEvent, error) {
 	ok, err := verifyWebhook(body, header, secrets, opts)
 	if err != nil {
@@ -75,7 +78,7 @@ func ParseWebhook(body []byte, header string, secrets []string, opts *VerifyOpti
 	}
 	var event StreamEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		return nil, fmt.Errorf("voltkit: the webhook body is not JSON: %w", err)
+		return nil, errors.New("voltkit: the webhook body is not JSON: " + decodeProblem(err, &event, "body"))
 	}
 	return &event, nil
 }
